@@ -51,6 +51,7 @@ def chat_payload(settings: dict, messages: list, **extra) -> dict:
         "model": ai["model"],
         "messages": messages,
         "think": bool(ai.get("think", False)),
+        "keep_alive": "1h",  # stay loaded between questions; reloading costs ~30 seconds
         "options": {"num_ctx": int(ai.get("num_ctx", 16384)), "temperature": 0.3},
         **extra,
     }

@@ -138,10 +138,18 @@ def listings(
     view: str = "matches", towns: str | None = None, sources: str | None = None,
     min_price: int | None = None, max_price: int | None = None,
     min_beds: float | None = None, max_beds: float | None = None,
-    text: str | None = None, sort: str = "score",
+    text: str | None = None, sort: str = "score", ids: str | None = None,
     limit: int = Query(300, le=1000), offset: int = 0,
 ):
     admin = request.state.admin
+    if ids:  # an explicit set, in the order asked for (used to show the assistant's results)
+        wanted = [int(i) for i in ids.split(",") if i.strip().isdigit()][:100]
+        rows = db.get_listings_by_ids(wanted)
+        for row in rows:
+            row["description"] = (row["description"] or "")[:300]
+            if not admin:
+                _for_visitor(row)
+        return {"total": len(rows), "listings": rows}
     if not admin and view not in VISITOR_VIEWS:
         view = "matches"
     rows, total = db.query_listings(
@@ -260,6 +268,21 @@ def stats():
 def chat_history(session_id: str):
     return [m for m in chat.load_history(session_id)
             if m["role"] in ("user", "assistant") and m.get("content")]
+
+
+@app.post("/api/chat-warm")
+async def chat_warm():
+    """Load the model ahead of the first question so the first answer is not slow."""
+    import httpx
+
+    settings = db.get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            await client.post(f"{ai.base_url(settings)}/api/chat",
+                              json=ai.chat_payload(settings, [], stream=False))
+    except Exception as exc:
+        return {"ok": False, "error": ai.describe_error(exc)}
+    return {"ok": True}
 
 
 @app.delete("/api/chat/{session_id}")

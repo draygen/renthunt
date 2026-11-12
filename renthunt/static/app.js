@@ -67,7 +67,9 @@ function ago(iso) {
 const TABS = [["matches", "Matches"], ["new", "New"], ["favorites", "Favorites"],
   ["pipeline", "In progress"], ["all", "All"], ["hidden", "Hidden"]];
 const VISITOR_TABS = ["matches", "new", "all"];
-const state = { view: "matches", listings: [], counts: {}, wasRunning: false, mapOn: false, admin: false, local: false };
+const state = { view: "matches", listings: [], counts: {}, wasRunning: false, mapOn: false, admin: false, local: false,
+  spotlight: null,   // {ids, label, center, distances}: the assistant's current result set
+  byId: {} };        // every listing seen so far, for labelling #ids in chat
 let sessionId = localStorage.getItem("renthunt-session");
 if (!sessionId) {
   sessionId = "s" + Date.now().toString(36);
@@ -80,6 +82,7 @@ function renderTabs() {
   $("#tabs").replaceChildren(...tabs.map(([key, label]) =>
     h("button", { class: key === state.view ? "active" : "", onclick: () => { state.view = key; renderTabs(); loadListings(); } },
       label, h("span", { class: "n" }, state.counts[key] ?? ""))));
+  for (const button of $("#tabs").children) button.addEventListener("click", () => { state.spotlight = null; }, true);
 }
 
 async function loadOverview() {
@@ -128,10 +131,23 @@ function filterQuery() {
   return q;
 }
 
+function renderSpotlight() {
+  const bar = $("#spotlight");
+  bar.hidden = !state.spotlight;
+  if (!state.spotlight) return;
+  const n = state.spotlight.ids.length;
+  bar.replaceChildren(`Showing ${n} listing${n === 1 ? "" : "s"} ${state.spotlight.label}`,
+    h("div", { class: "spacer" }),
+    h("button", { onclick: () => { state.spotlight = null; loadListings(); } }, "Back to all listings"));
+}
+
 async function loadListings() {
   try {
-    const data = await api("/api/listings?" + filterQuery());
+    const data = await api("/api/listings?" + (state.spotlight
+      ? "ids=" + state.spotlight.ids.join(",") : filterQuery()));
     state.listings = data.listings;
+    for (const l of data.listings) state.byId[l.id] = l;
+    renderSpotlight();
     $("#result-count").textContent = `${data.total} listing${data.total === 1 ? "" : "s"}`;
     renderGrid();
     if (state.mapOn) renderMap();
@@ -163,7 +179,8 @@ function renderCard(l) {
   const price = l.match_price ?? l.price;
   const range = l.price_max && l.price_max > price;
   const stop = (fn) => (event) => { event.stopPropagation(); fn(); };
-  return h("article", { class: "card" + (l.active ? "" : " inactive"), onclick: () => openDetail(l.id) },
+  const distance = state.spotlight?.distances?.[l.id];
+  return h("article", { class: "card" + (l.active ? "" : " inactive"), id: "card-" + l.id, onclick: () => openDetail(l.id) },
     h("div", { class: "photo", style: l.images[0] ? `background-image:url("${encodeURI(l.images[0])}")` : "" },
       l.images[0] ? "" : "🏠"),
     l.is_match ? h("div", { class: "score", title: "Match score out of 100" }, l.score) : null,
@@ -172,7 +189,8 @@ function renderCard(l) {
         h("span", { class: "price" }, (range ? "from " : "") + money(price)),
         l.price_prev && l.price_prev > l.price ? h("span", { class: "was" }, money(l.price_prev)) : null),
       h("div", { class: "facts" }, [bedsText(l), l.baths ? `${l.baths} ba` : "", l.sqft ? `${l.sqft} sq ft` : "",
-        l.town || ""].filter(Boolean).join(" · ")),
+        l.town || ""].filter(Boolean).join(" · "),
+        distance !== undefined ? h("span", { class: "dist" }, ` · ${distance} mi away`) : null),
       h("div", { class: "title" }, l.title),
       h("div", { class: "why" }, (l.is_match ? l.reasons.slice(1) : l.reasons).join(" · ")),
       h("div", { class: "badges" }, flagBadges(l), h("span", { class: "badge" }, ago(l.posted_at || l.first_seen))),
@@ -199,6 +217,24 @@ function renderGrid() {
 
 // ---------- map ----------
 let map, markerLayer;
+const markers = {};
+
+/** Bring one listing forward: flash its card and open its pin, or open the detail view. */
+function focusListing(id) {
+  const card = document.getElementById("card-" + id);
+  if (!card || isMobile()) { openDetail(id); return; }
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("flash");
+  setTimeout(() => card.classList.remove("flash"), 2500);
+  if (state.mapOn && markers[id]) markers[id].openPopup();
+}
+
+function setMap(on) {
+  state.mapOn = on;
+  $("#map").hidden = !on;
+  $("#btn-map").textContent = on ? "Hide map" : "Map";
+  if (on) renderMap();
+}
 function renderMap() {
   if (!window.L) { toast("The map library could not be loaded (offline?)"); return; }
   if (!map) {
@@ -208,7 +244,14 @@ function renderMap() {
     markerLayer = L.layerGroup().addTo(map);
   }
   markerLayer.clearLayers();
+  for (const id of Object.keys(markers)) delete markers[id];
   const points = [];
+  const spot = state.spotlight;
+  if (spot?.center) {
+    L.circleMarker([spot.center.lat, spot.center.lng], { radius: 9, color: "#fff", fillColor: "#1d4ed8", fillOpacity: 1, weight: 3 })
+      .bindTooltip(spot.center.label, { permanent: true, direction: "bottom", className: "home" }).addTo(markerLayer);
+    points.push([spot.center.lat, spot.center.lng]);
+  }
   for (const l of state.listings) {
     if (l.lat === null || l.lng === null) continue;
     const color = l.score >= 75 ? "#067647" : l.score >= 50 ? "#b45309" : "#667085";
@@ -216,8 +259,11 @@ function renderMap() {
       h("strong", {}, `${money(l.match_price ?? l.price)} · ${bedsText(l)}`), h("br"),
       l.title.slice(0, 70), h("br"),
       h("a", { href: "#", onclick: (e) => { e.preventDefault(); openDetail(l.id); } }, "Details"));
-    L.circleMarker([l.lat, l.lng], { radius: 8, color, fillColor: color, fillOpacity: 0.75, weight: 1 })
-      .bindPopup(popup).addTo(markerLayer);
+    const marker = L.circleMarker([l.lat, l.lng], spot
+      ? { radius: 10, color: "#fff", fillColor: "#0f766e", fillOpacity: 1, weight: 2 }
+      : { radius: 8, color, fillColor: color, fillOpacity: 0.75, weight: 1 }).bindPopup(popup).addTo(markerLayer);
+    if (spot) marker.bindTooltip((isMobile() ? "" : `#${l.id} `) + money(l.match_price ?? l.price), { permanent: true, direction: "top", className: "pin", offset: [0, -8] });
+    markers[l.id] = marker;
     points.push([l.lat, l.lng]);
   }
   if (points.length) map.fitBounds(points, { padding: [30, 30], maxZoom: 14 });
@@ -301,7 +347,10 @@ function richText(text) {
     if (m[1]) frag.append(h("strong", {}, m[1].slice(2, -2)));
     else if (m[2]) {
       const id = Number(m[2].slice(1));
-      frag.append(h("a", { class: "ref", title: "Open this listing", onclick: () => openDetail(id) }, m[2]));
+      const known = state.byId[id];
+      const label = known ? `${m[2]} · ${money(known.match_price ?? known.price)} · ${[bedsText(known), known.town].filter(Boolean).join(" · ")}` : m[2];
+      frag.append(h("a", { class: "ref" + (known ? " chip" : ""), title: known ? known.title : "Open this listing",
+        onclick: () => focusListing(id), ondblclick: () => openDetail(id) }, label));
     } else frag.append(h("a", { href: m[3], target: "_blank", rel: "noopener" }, m[3]));
     last = pattern.lastIndex;
   }
@@ -345,7 +394,7 @@ async function askAssistant(text) {
   const bubble = addMessage("assistant", "");
   const working = h("span", { class: "tool" }, "Thinking…");
   bubble.append(working);
-  let answer = "";
+  let answer = "", shown = 0;
   const redraw = () => {
     bubble.replaceChildren(richText(answer), working);
     bubble.scrollIntoView({ block: "end" });
@@ -368,6 +417,14 @@ async function askAssistant(text) {
         const event = JSON.parse(line);
         if (event.type === "text") { answer += event.delta; working.textContent = ""; redraw(); }
         else if (event.type === "tool") { working.textContent = event.label + "…"; redraw(); }
+        else if (event.type === "show") {
+          state.spotlight = { ids: event.ids, label: event.label, center: event.center, distances: event.distances };
+          shown = event.ids.length;
+          await loadListings();
+          setMap(true);
+          $("#content").scrollTo({ top: 0, behavior: "smooth" });
+          redraw();
+        }
         else if (event.type === "refresh") { loadListings(); loadOverview(); loadTowns(); }
         else if (event.type === "error") addMessage("error", event.message);
       }
@@ -376,7 +433,12 @@ async function askAssistant(text) {
     addMessage("error", err.message);
   }
   working.remove();
-  if (!answer.trim()) bubble.remove();
+  if (answer.trim()) bubble.replaceChildren(richText(answer)); else bubble.remove();
+  if (shown && isMobile()) {  // on a phone the results sit behind the assistant sheet
+    $("#chat-log").append(h("button", { class: "primary", onclick: () => $("#chat").classList.add("hidden") },
+      `View ${shown === 1 ? "this listing" : `these ${shown} listings`} on the map`));
+    $("#chat-log").lastChild.scrollIntoView({ block: "end" });
+  }
   chatBusy = false;
   $("#chat-send").disabled = false;
 }
@@ -560,7 +622,11 @@ async function start() {
     : openLogin;
   await loadOverview();
   loadListings();
-  if (state.admin) loadChat();
+  if (isMobile()) $("#chat").classList.add("hidden");
+  if (state.admin) {
+    loadChat();
+    fetch("/api/chat-warm", { method: "POST" }).catch(() => {});  // load the model before the first question
+  }
   setInterval(loadOverview, 5000);
 }
 
@@ -572,14 +638,11 @@ $("#btn-hunt").onclick = async () => {
     loadOverview();
   } catch (err) { toast(err.message); }
 };
-$("#btn-map").onclick = () => {
-  state.mapOn = !state.mapOn;
-  $("#map").hidden = !state.mapOn;
-  $("#btn-map").textContent = state.mapOn ? "Hide map" : "Map";
-  if (state.mapOn) renderMap();
-};
+$("#btn-map").onclick = () => setMap(!state.mapOn);
 $("#btn-settings").onclick = openSettings;
+const isMobile = () => window.matchMedia("(max-width: 900px)").matches;
 $("#btn-chat").onclick = () => $("#chat").classList.toggle("hidden");
+$("#chat-close").onclick = () => $("#chat").classList.add("hidden");
 $("#btn-seen").onclick = async () => { await api("/api/listings/mark-seen", { method: "POST" }); loadListings(); loadOverview(); };
 $("#chat-new").onclick = async () => { await api(`/api/chat/${sessionId}`, { method: "DELETE" }); loadChat(); };
 $("#chat-form").onsubmit = (e) => {
@@ -595,7 +658,7 @@ $("#chat-input").onkeydown = (e) => {
 };
 let filterTimer;
 for (const id of ["f-text", "f-town", "f-beds", "f-max", "f-source", "f-sort"]) {
-  $("#" + id).addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(loadListings, 250); });
+  $("#" + id).addEventListener("input", () => { state.spotlight = null; clearTimeout(filterTimer); filterTimer = setTimeout(loadListings, 250); });
 }
 
 start();

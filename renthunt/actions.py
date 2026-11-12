@@ -66,6 +66,40 @@ def lookup_zip(zip_code: str) -> dict | None:
         return None
 
 
+# Rough box around the Merrimack Valley, so "Chelmsford St" resolves here and not in another state.
+GEOCODE_BOX = "-71.60,42.92,-70.90,42.42"
+
+
+def geocode(place: str) -> dict | None:
+    """Coordinates for a street, address or landmark (OpenStreetMap Nominatim; cached)."""
+    key = "geo:" + " ".join(place.lower().split())
+    cached = db.get_state(key)
+    if cached:
+        return cached
+    try:
+        resp = httpx.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": place, "format": "jsonv2", "limit": 1, "countrycodes": "us", "addressdetails": 1,
+                    "viewbox": GEOCODE_BOX, "bounded": 1},
+            headers={"User-Agent": "RentHunt/0.1 (personal rental search tool)"}, timeout=12,
+        )
+        resp.raise_for_status()
+        hits = resp.json()
+    except Exception:
+        return None
+    if not hits:
+        return None
+    address = hits[0].get("address") or {}
+    first = hits[0]["display_name"].split(",")[0].strip()
+    if address.get("house_number") and address.get("road"):
+        first = f"{address['house_number']} {address['road']}"
+    town = address.get("city") or address.get("town") or address.get("village") or ""
+    label = f"{first}, {town}" if town and town != first else first
+    found = {"lat": float(hits[0]["lat"]), "lng": float(hits[0]["lon"]), "label": label}
+    db.set_state(key, found)
+    return found
+
+
 def set_towns(enable: list[str] = (), disable: list[str] = (), add: list[dict] = ()) -> dict:
     settings = db.get_settings()
     towns = settings["towns"]

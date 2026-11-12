@@ -230,6 +230,17 @@ def query_listings(
     return [row_to_listing(r) for r in rows], total
 
 
+def get_listings_by_ids(ids: list[int]) -> list[dict]:
+    """Listings in the order the ids were given; unknown ids are skipped."""
+    if not ids:
+        return []
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM listings WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
+    found = {r["id"]: row_to_listing(r) for r in rows}
+    return [found[i] for i in ids if i in found]
+
+
 def update_listing(listing_id: int, **fields) -> dict | None:
     allowed = {"status", "favorite", "hidden", "notes"}
     fields = {k: v for k, v in fields.items() if k in allowed and v is not None}

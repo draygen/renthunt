@@ -77,7 +77,7 @@ main { flex: 1; display: flex; min-height: 0; }
 .card .actions button { padding: 3px 9px; font-size: 13px; }
 .fav.on { color: #e11d48; border-color: #e11d48; }
 
-#map { height: 460px; border-radius: 12px; border: 1px solid var(--line); margin-bottom: 14px; }
+#map { position: relative; z-index: 0; isolation: isolate; height: 460px; border-radius: 12px; border: 1px solid var(--line); margin-bottom: 14px; }
 .leaflet-popup-content { font: 13px/1.4 system-ui, sans-serif; }
 
 #chat { width: 380px; max-width: 100%; display: flex; flex-direction: column; background: var(--panel);
@@ -134,13 +134,61 @@ pre.log { background: var(--bg); border: 1px solid var(--line); border-radius: 8
 #toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--bg);
   padding: 9px 16px; border-radius: 10px; z-index: 50; box-shadow: var(--shadow); }
 
+.mobile-only { display: none; }
+body { height: 100dvh; }
+
 @media (max-width: 900px) {
-  main { flex-direction: column; }
-  #chat { width: 100%; border-left: 0; border-top: 1px solid var(--line); height: 55vh; }
+  .mobile-only { display: inline-block; }
+  /* The assistant becomes a full-screen sheet opened from the header. */
+  #chat { position: fixed; inset: 0; width: 100%; z-index: 30; border: 0;
+    padding-bottom: env(safe-area-inset-bottom); }
   .detail-grid { grid-template-columns: 1fr; }
+  header { padding: 8px 10px; gap: 6px; }
+  header .spacer { display: none; }
+  .brand { font-size: 16px; }
+  .byline { order: 6; flex: 1 1 100%; font-size: 11px; }
+  .brand { flex: 1; }
+  .status { order: 5; flex: 1 1 100%; font-size: 12px; }
+  .leaflet-tooltip.pin { font-size: 11px; padding: 0 4px; }
+  header button { padding: 7px 10px; }
+  #content { padding: 10px 10px 40px; }
+  #tabs { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  #tabs button { flex: none; }
+  #filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  #filters > * { min-width: 0; width: 100%; }
+  #filters #f-text { grid-column: 1 / -1; }
+  #filters #result-count { margin: 0; align-self: center; }
+  #filters #btn-seen { text-align: right; }
+  #map { height: 52dvh; }
+  dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; margin: 0; }
+  .dlg-head { padding: 10px 12px; flex-wrap: wrap; }
+  .dlg-head h2 { flex: 1 1 100%; font-size: 15px; }
+  .dlg-body { padding: 12px; }
+  .gallery img { height: 180px; }
+  .set input[type=number] { width: 100%; }
+  .set label.field { flex: 1 1 40%; }
+  #login { height: auto; width: 92vw; border-radius: 14px; margin: auto; border: 1px solid var(--line); }
+  /* 16px inputs stop iOS from zooming the page on focus; larger buttons are easier to hit. */
+  input, select, textarea { font-size: 16px; }
+  .card .actions button { padding: 7px 12px; font-size: 14px; }
+  .msg { max-width: 96%; }
+}
+@media (max-width: 600px) {
+  #grid { grid-template-columns: 1fr; }
+  .card .photo { height: 200px; }
 }
 
 body.visitor .admin-only { display: none !important; }
 #login { width: min(360px, 92vw); }
 #login form { display: flex; flex-direction: column; gap: 10px; padding: 18px; }
 #login h2 { margin: 0; font-size: 17px; }
+
+#spotlight { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--accent-soft);
+  border: 1px solid var(--accent); border-radius: 10px; padding: 8px 12px; margin-bottom: 14px; font-weight: 600; }
+#spotlight[hidden] { display: none; }
+.card.flash { outline: 3px solid var(--accent); outline-offset: 2px; }
+.card .dist { color: var(--accent); font-weight: 600; }
+.msg a.ref.chip { display: inline-block; background: var(--accent-soft); border: 1px solid var(--accent);
+  border-radius: 8px; padding: 0 7px; margin: 1px 0; font-weight: 600; white-space: nowrap; }
+.leaflet-tooltip.pin { font-weight: 700; padding: 1px 6px; }
+.leaflet-tooltip.home { background: #1d4ed8; color: #fff; border-color: #1d4ed8; font-weight: 700; }

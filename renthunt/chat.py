@@ -9,6 +9,7 @@ from typing import AsyncIterator
 import httpx
 
 from . import actions, ai, db, hunt
+from .sources.base import miles
 
 MAX_ROUNDS = 6
 HISTORY_MESSAGES = 16
@@ -21,8 +22,13 @@ How to work:
 - Everything you say about listings must come from a tool result. Call search_listings or \
 get_listing before describing, comparing or recommending anything; never make up a listing, \
 price or address.
-- Refer to a listing by its id written as #123 (the app turns that into a link). When listing \
-several, use one short line each: id, rent, bedrooms, town, and the one thing that stands out.
+- The app shows every listing you find as photo cards in the main view and as pins on the map, \
+so do not repeat the whole result list. Answer in two to four sentences: how many you found, \
+and your top two or three picks written as #123 (the app turns an id into a labelled link) \
+with one reason each.
+- For "near", "close to" or "around" a street, address or landmark, use the `near` parameter \
+of search_listings. A street name is not a town: "Chelmsford St" is a street, "Chelmsford" is \
+a town. Tell the user which place you searched around.
 - When the user tells you what they want (budget, bedrooms, towns, pets, features), save it \
 with update_criteria or set_towns right away, then say in one sentence what you changed and \
 how many listings now match. "A 2 bedroom" means min_beds 2 and max_beds 2; "under $2,000" \
@@ -63,10 +69,13 @@ TOOLS = [
                                     "pipeline = contacted, touring or applied; all = everything stored"},
             "text": {"type": "string", "description": "Word or phrase to find in the title, description or notes"},
             "towns": {**_strs, "description": "Only these towns"},
+            "near": {"type": "string", "description": "Street, address or landmark to search around, "
+                     "e.g. 'Chelmsford St, Lowell'. Results come back nearest first with distances."},
+            "radius_miles": {**_num, "description": "With near: how far out to look, default 2"},
             "min_price": _num, "max_price": _num, "min_beds": _num, "max_beds": _num,
             "new_since_hours": {**_num, "description": "Only listings first seen in the last N hours"},
             "sort": {"type": "string", "enum": ["score", "newest", "price_asc", "price_desc"]},
-            "limit": {**_num, "description": "Rows to return, default 8, at most 15"},
+            "limit": {**_num, "description": "Rows to return, default 10, at most 20"},
         }),
     _fn("get_listing", "Full details of one listing: description, amenities, address, contact, notes, price history.",
         {"id": {"type": "integer"}}, ["id"]),
@@ -157,15 +166,43 @@ def run_tool(name: str, args: dict) -> dict:
                 towns = [towns]
             known = {t["name"].lower(): t["name"] for t in db.get_settings()["towns"]}
             towns = [known.get(str(t).lower(), str(t)) for t in towns or []] or None
-            limit = min(15, max(1, _opt(args, "limit", int) or 8))
-            listings, total = db.query_listings(
+            limit = min(20, max(1, _opt(args, "limit", int) or 10))
+            near = (args.get("near") or "").strip()
+            filters = dict(
                 view=args.get("view") or "matches", text=args.get("text") or None, towns=towns,
                 min_price=_opt(args, "min_price", int), max_price=_opt(args, "max_price", int),
                 min_beds=_opt(args, "min_beds", float), max_beds=_opt(args, "max_beds", float),
                 new_since_hours=_opt(args, "new_since_hours", float),
-                sort=args.get("sort") or "score", limit=limit,
             )
-            return {"total_found": total, "showing": len(listings), "listings": [_compact(l) for l in listings]}
+            if near:
+                center = actions.geocode(near)
+                if not center:
+                    return {"error": f"could not find '{near}' on the map. Ask the user which town it is in, "
+                                     "then search again with the town added, e.g. 'Main St, Dracut'."}
+                radius = _opt(args, "radius_miles", float) or 2.0
+                filters["towns"] = None  # distance decides, not town lines
+                everything, _ = db.query_listings(**filters, limit=5000)
+                located = sorted(
+                    ((miles(center["lat"], center["lng"], l["lat"], l["lng"]), l)
+                     for l in everything if l["lat"] is not None and l["lng"] is not None),
+                    key=lambda pair: pair[0])
+                within = [pair for pair in located if pair[0] <= radius]
+                note = None
+                if not within:
+                    within = located[:5]
+                    note = f"Nothing within {radius:g} miles; these are the closest."
+                picked = within[:limit]
+                rows = [{**_compact(l), "distance_miles": round(d, 1)} for d, l in picked]
+                out = {"searched_around": center["label"], "found_within_radius": len(within),
+                       "showing": len(rows), "listings": rows}
+                if note:
+                    out["note"] = note
+                out["_ui"] = {"ids": [l["id"] for _, l in picked], "label": f"near {center['label']}",
+                              "center": center, "distances": {l["id"]: round(d, 1) for d, l in picked}}
+                return out
+            listings, total = db.query_listings(**filters, sort=args.get("sort") or "score", limit=limit)
+            return {"total_found": total, "showing": len(listings), "listings": [_compact(l) for l in listings],
+                    "_ui": {"ids": [l["id"] for l in listings], "label": "from the assistant"}}
         if name == "get_listing":
             listing = db.get_listing(int(args["id"]))
             if not listing:
@@ -305,6 +342,9 @@ async def respond(session_id: str, text: str) -> AsyncIterator[dict]:
                     yield {"type": "tool", "name": name, "label": TOOL_LABELS.get(name, name)}
                     result = await asyncio.to_thread(run_tool, name, args if isinstance(args, dict) else {})
                     changed = changed or (name in MUTATING and "error" not in result)
+                    ui = result.pop("_ui", None)
+                    if ui and ui["ids"]:
+                        yield {"type": "show", **ui}
                     reply = {"role": "tool", "tool_name": name, "content": json.dumps(result, default=str)}
                     messages.append(reply)
                     _save(session_id, reply)

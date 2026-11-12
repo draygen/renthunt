@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="author" content="Draygen aka Brian Wallace">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
 <title>RentHunt</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -45,6 +46,7 @@
       <span id="result-count"></span>
       <button id="btn-seen" class="link admin-only" title="Clear the NEW badge from every listing">Mark all seen</button>
     </div>
+    <div id="spotlight" hidden></div>
     <div id="map" hidden></div>
     <div id="grid"></div>
   </section>
@@ -54,6 +56,7 @@
       <strong>Assistant</strong> <span id="ai-status" class="muted"></span>
       <div class="spacer"></div>
       <button id="chat-new" class="link">New chat</button>
+      <button id="chat-close" class="mobile-only" aria-label="Close assistant">✕</button>
     </div>
     <div id="chat-log"></div>
     <div id="chat-suggest"></div>
