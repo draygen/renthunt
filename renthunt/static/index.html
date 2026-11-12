@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="author" content="Draygen aka Brian Wallace">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RentHunt</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">🏠 RentHunt</div>
+  <div class="byline">by Draygen aka Brian Wallace</div>
+  <div id="status" class="status" title="Hunt status"></div>
+  <div class="spacer"></div>
+  <button id="btn-hunt" class="primary admin-only">Hunt now</button>
+  <button id="btn-map" title="Show matches on a map">Map</button>
+  <button id="btn-settings" class="admin-only">Settings</button>
+  <button id="btn-chat" class="admin-only" title="Show or hide the assistant">Assistant</button>
+  <button id="btn-login" hidden>Sign in</button>
+</header>
+
+<main>
+  <section id="content">
+    <nav id="tabs"></nav>
+    <div id="filters">
+      <input id="f-text" type="search" placeholder="Search title, description, notes…">
+      <select id="f-town"><option value="">All towns</option></select>
+      <select id="f-beds">
+        <option value="">Any beds</option><option value="0">Studio</option>
+        <option value="1">1 bed</option><option value="2">2 beds</option>
+        <option value="3">3 beds</option><option value="4">4+ beds</option>
+      </select>
+      <input id="f-max" type="number" min="0" step="50" placeholder="Max $">
+      <select id="f-source">
+        <option value="">All sources</option><option value="craigslist">Craigslist</option>
+        <option value="rentcom">Rent.com</option><option value="watch">Watched pages</option>
+      </select>
+      <select id="f-sort">
+        <option value="score">Best match</option><option value="newest">Newest</option>
+        <option value="price_asc">Rent: low to high</option><option value="price_desc">Rent: high to low</option>
+      </select>
+      <span id="result-count"></span>
+      <button id="btn-seen" class="link admin-only" title="Clear the NEW badge from every listing">Mark all seen</button>
+    </div>
+    <div id="map" hidden></div>
+    <div id="grid"></div>
+  </section>
+
+  <aside id="chat" class="admin-only">
+    <div class="chat-head">
+      <strong>Assistant</strong> <span id="ai-status" class="muted"></span>
+      <div class="spacer"></div>
+      <button id="chat-new" class="link">New chat</button>
+    </div>
+    <div id="chat-log"></div>
+    <div id="chat-suggest"></div>
+    <form id="chat-form">
+      <textarea id="chat-input" rows="2" placeholder="Ask about listings, or tell me what you want…"></textarea>
+      <button class="primary" id="chat-send">Send</button>
+    </form>
+  </aside>
+</main>
+
+<dialog id="detail"></dialog>
+<dialog id="settings"></dialog>
+<dialog id="login"></dialog>
+<div id="toast" hidden></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
