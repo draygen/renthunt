@@ -67,14 +67,78 @@ def criteria_brief(settings: dict) -> str:
     ]
     if c.get("min_baths"):
         lines.append(f"Bathrooms: at least {c['min_baths']}")
-    if c.get("cats") or c.get("dogs"):
-        lines.append("Pets required: " + ", ".join(p for p in ("cats", "dogs") if c.get(p)))
+    if c.get("move_in") == "asap":
+        lines.append("Timing: needs to move IMMEDIATELY; places available now come first")
+    if c.get("cats"):
+        lines.append(f"Pets: has {c.get('cat_count') or 1} cat(s); the place must allow them")
+    if c.get("dogs"):
+        lines.append("Pets: has a dog; the place must allow dogs")
     for key, label in (("must_have", "Must have"), ("nice_to_have", "Nice to have"), ("exclude", "Excluded words")):
         if c.get(key):
             lines.append(f"{label}: {', '.join(c[key])}")
     if c.get("notes"):
         lines.append(f"Other preferences: {c['notes']}")
     return "\n".join(lines)
+
+
+# ---------- plain words -> search filters ----------
+
+class SmartFilters(BaseModel):
+    keywords: str | None = None
+    towns: list[str] | None = None
+    min_beds: float | None = None
+    max_beds: float | None = None
+    min_price: int | None = None
+    max_price: int | None = None
+    near: str | None = None
+    radius_miles: float | None = None
+    available_now: bool | None = None
+    cats_ok: bool | None = None
+    sort: str | None = None
+
+
+SMART_SYSTEM = """Turn a person's apartment search, written in plain words, into search filters. \
+Reply with JSON only. Set a field only when the request asks for it; use null otherwise.
+
+- towns: only from this list: {towns}
+- min_beds / max_beds: "2 bedroom" means both are 2; "at least 2" means min_beds 2; studio is 0
+- min_price / max_price: monthly rent in dollars ("under 1900" means max_price 1900)
+- near: a street, address, landmark, or one of these saved names: {places}. Use it for "near", \
+"close to", "by", "around", "walking distance". A street is not a town.
+- radius_miles: only if a distance is stated
+- available_now: true for "now", "asap", "immediately", "right away", "move in today"
+- cats_ok: true when cats or pets are mentioned
+- sort: null unless an order is asked for; then price_asc ("cheapest"), price_desc, or newest
+- keywords: the one feature word the place must mention, if any: "with a garage" gives \
+"garage", "has a balcony" gives "balcony". Never towns, prices, bedrooms, pets or timing.
+
+Example: "2 bed with a garage near Elm St under 2000, asap" gives {{"keywords": "garage", \
+"min_beds": 2, "max_beds": 2, "max_price": 2000, "near": "Elm St", "available_now": true}}"""
+
+
+def smart_filters(settings: dict, text: str) -> dict:
+    system = SMART_SYSTEM.format(
+        towns=", ".join(t["name"] for t in settings["towns"]),
+        places=", ".join(p["name"] for p in settings["places"]) or "(none)")
+    payload = chat_payload(settings, [{"role": "system", "content": system}, {"role": "user", "content": text}],
+                           stream=False, format=SmartFilters.model_json_schema())
+    payload["think"] = False
+    payload["options"]["temperature"] = 0
+    resp = httpx.post(f"{base_url(settings)}/api/chat", json=payload, timeout=120)
+    resp.raise_for_status()
+    try:
+        found = SmartFilters.model_validate(json.loads(resp.json()["message"]["content"]))
+    except (KeyError, ValueError, ValidationError) as exc:
+        raise RuntimeError("the model did not return usable filters") from exc
+    known = {t["name"].lower(): t["name"] for t in settings["towns"]}
+    out = {k: v for k, v in found.model_dump().items() if v not in (None, "", [], False)}
+    if "towns" in out:
+        out["towns"] = [known[t.lower()] for t in out["towns"] if t.lower() in known]
+        if not out["towns"]:
+            del out["towns"]
+    if out.get("sort") not in ("score", "newest", "price_asc", "price_desc"):
+        out.pop("sort", None)
+    return out
 
 
 # ---------- extraction from a watched page ----------

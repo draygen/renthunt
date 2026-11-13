@@ -7,11 +7,44 @@ import threading
 import httpx
 
 from . import ai, db, hunt
+from .sources.base import miles as _miles
+
+def resolve_place(near: str) -> dict | None:
+    """A saved person/place by name, otherwise a street, address or landmark."""
+    for place in db.get_settings()["places"]:
+        if place["name"].lower() in near.lower():
+            return {"lat": place["lat"], "lng": place["lng"], "label": place["name"], "saved": True}
+    return geocode(near)
+
+
+def search(*, near: str | None = None, radius_miles: float | None = None, sort: str = "score",
+           limit: int = 300, **filters) -> dict:
+    """Filtered listings. With `near`, only those within the radius, each with a `distance`."""
+    near = (near or "").strip()
+    if not near:
+        rows, total = db.query_listings(**filters, sort=sort, limit=limit)
+        return {"listings": rows, "total": total, "center": None}
+    center = resolve_place(near)
+    if not center:
+        raise ValueError(f"could not find '{near}' on the map; add the town, e.g. 'Main St, Dracut'")
+    radius = float(radius_miles or (4 if center.get("saved") else 2))
+    rows, _ = db.query_listings(**{**filters, "towns": None}, sort=sort, limit=5000)
+    within = []
+    for row in rows:
+        if row["lat"] is None or row["lng"] is None:
+            continue
+        row["distance"] = round(_miles(center["lat"], center["lng"], row["lat"], row["lng"]), 1)
+        if row["distance"] <= radius:
+            within.append(row)
+    if sort in ("score", "distance"):  # nearest first unless a price or date order was asked for
+        within.sort(key=lambda r: r["distance"])
+    return {"listings": within[:limit], "total": len(within), "center": {**center, "radius": radius}}
+
 
 CRITERIA_TYPES = {
     "min_price": int, "max_price": int, "min_beds": float, "max_beds": float, "min_baths": float,
     "cats": bool, "dogs": bool, "must_have": list, "nice_to_have": list, "exclude": list,
-    "max_age_days": int, "notes": str,
+    "max_age_days": int, "notes": str, "cat_count": int, "move_in": str,
 }
 
 
@@ -44,6 +77,10 @@ def update_criteria(patch: dict) -> dict:
             criteria[key] = _coerce(value, CRITERIA_TYPES[key])
         except (TypeError, ValueError):
             raise ValueError(f"{key} has an invalid value: {value!r}") from None
+    if criteria["move_in"] not in ("any", "asap"):
+        criteria["move_in"] = "asap" if "asap" in criteria["move_in"].lower() or "now" in criteria["move_in"].lower() else "any"
+    if patch.get("cat_count"):
+        criteria["cats"] = criteria["cat_count"] > 0
     if criteria["min_price"] > criteria["max_price"]:
         raise ValueError("min_price is above max_price")
     if criteria["min_beds"] > criteria["max_beds"]:
@@ -170,14 +207,26 @@ def update_schedule(patch: dict) -> dict:
     return sched
 
 
-def add_watch(url: str, label: str = "") -> dict:
+def add_watch(url: str, label: str = "", render: bool = False) -> dict:
     url = (url or "").strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("the address must start with http:// or https://")
     with db.connect() as conn:
-        conn.execute("INSERT OR IGNORE INTO watch_urls (url, label) VALUES (?, ?)", (url, label.strip()))
+        conn.execute("INSERT OR IGNORE INTO watch_urls (url, label, render) VALUES (?, ?, ?)",
+                     (url, label.strip(), int(bool(render))))
         row = conn.execute("SELECT * FROM watch_urls WHERE url=?", (url,)).fetchone()
     return dict(row)
+
+
+def update_watch(watch_id: int, render: bool | None = None, enabled: bool | None = None) -> None:
+    """Change how a watched page is read. Switching the method forgets the remembered page,
+    so the next hunt reads it afresh."""
+    with db.connect() as conn:
+        if render is not None:
+            conn.execute("UPDATE watch_urls SET render=?, last_hash=NULL WHERE id=? AND render!=?",
+                         (int(bool(render)), watch_id, int(bool(render))))
+        if enabled is not None:
+            conn.execute("UPDATE watch_urls SET enabled=? WHERE id=?", (int(bool(enabled)), watch_id))
 
 
 def list_watches() -> list[dict]:

@@ -44,7 +44,22 @@ function toast(message) {
 }
 
 const money = (n) => (n === null || n === undefined ? "—" : "$" + Number(n).toLocaleString());
-const SOURCE_NAMES = { craigslist: "Craigslist", rentcom: "Rent.com", watch: "Watched page" };
+const SOURCE_NAMES = { craigslist: "Craigslist", rentcom: "Rent.com", rentcast: "RentCast", watch: "Watched page", mail: "Email alert" };
+// How the last read of a watched page went: [badge style, short name].
+const WATCH_STATES = { ok: ["good", "Read OK"], empty: ["good", "No vacancies"], partial: ["warn", "Partly read"],
+  blocked: ["bad", "Blocked"], incomplete: ["warn", "Came back empty"], failed: ["bad", "Not read"] };
+const RUN_STATUS = { partial: "partly checked", failed: "failed" };
+
+/** What went wrong in a hunt, one line per search or page that could not be checked. */
+function runProblems(summary) {
+  const out = [];
+  for (const [name, src] of Object.entries(summary?.sources || {})) {
+    const label = SOURCE_NAMES[name] || name;
+    if (src.error && !(src.problems || []).length) out.push(`${label}: ${src.error}`);
+    for (const problem of src.problems || []) out.push(`${label}: ${problem}`);
+  }
+  return out;
+}
 const STATUS_NAMES = { new: "New", seen: "Seen", contacted: "Contacted", touring: "Touring",
   applied: "Applied", rejected: "Not interested" };
 
@@ -69,7 +84,7 @@ const TABS = [["matches", "Matches"], ["new", "New"], ["favorites", "Favorites"]
 const VISITOR_TABS = ["matches", "new", "all"];
 const state = { view: "matches", listings: [], counts: {}, wasRunning: false, mapOn: false, admin: false, local: false,
   places: [],        // people/places to show distance to (owner only)
-  spotlight: null,   // {ids, label, center, distances}: the assistant's current result set
+  center: null,      // {lat, lng, label, radius} when the current search is "near" somewhere
   byId: {} };        // every listing seen so far, for labelling #ids in chat
 let sessionId = localStorage.getItem("renthunt-session");
 if (!sessionId) {
@@ -83,7 +98,6 @@ function renderTabs() {
   $("#tabs").replaceChildren(...tabs.map(([key, label]) =>
     h("button", { class: key === state.view ? "active" : "", onclick: () => { state.view = key; renderTabs(); loadListings(); } },
       label, h("span", { class: "n" }, state.counts[key] ?? ""))));
-  for (const button of $("#tabs").children) button.addEventListener("click", () => { state.spotlight = null; }, true);
 }
 
 async function loadOverview() {
@@ -101,7 +115,9 @@ async function loadOverview() {
   } else {
     const parts = [];
     if (o.last_run) parts.push(`Last hunt ${ago(o.last_run.finished_at || o.last_run.started_at)}` +
-      (o.last_run.status !== "ok" ? ` (${o.last_run.status})` : ""));
+      (o.last_run.status !== "ok" ? ` (${RUN_STATUS[o.last_run.status] || o.last_run.status})` : ""));
+    const problems = o.last_run && o.last_run.status !== "ok" ? runProblems(o.last_run.summary) : [];
+    status.title = problems.length ? "Could not be checked on the last hunt:\n" + problems.join("\n") : "Hunt status";
     parts.push(o.next_run
       ? `next at ${new Date(o.next_run).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
       : "schedule off");
@@ -109,7 +125,8 @@ async function loadOverview() {
   }
   if (state.wasRunning && !o.running) {
     const found = o.last_run?.summary?.new_matches ?? 0;
-    toast(found ? `Hunt finished: ${found} new match${found === 1 ? "" : "es"}` : "Hunt finished: nothing new");
+    toast((found ? `Hunt finished: ${found} new match${found === 1 ? "" : "es"}` : "Hunt finished: nothing new") +
+      (o.last_run && o.last_run.status !== "ok" ? ". Some searches could not be checked." : ""));
     loadListings();
   }
   state.wasRunning = o.running;
@@ -125,46 +142,125 @@ function filterQuery() {
   if ($("#f-town").value) q.set("towns", $("#f-town").value);
   if ($("#f-source").value) q.set("sources", $("#f-source").value);
   if ($("#f-max").value) q.set("max_price", $("#f-max").value);
-  const beds = $("#f-beds").value;
-  if (beds !== "") {
-    q.set("min_beds", beds);
-    if (beds !== "4") q.set("max_beds", beds);
+  const [minBeds, maxBeds] = $("#f-beds").value.split("-");
+  if (minBeds) q.set("min_beds", minBeds);
+  if (maxBeds) q.set("max_beds", maxBeds);
+  if (state.admin && $("#f-near").value.trim()) {
+    q.set("near", $("#f-near").value.trim());
+    if ($("#f-radius").value) q.set("radius_miles", $("#f-radius").value);
   }
+  if ($("#f-now").getAttribute("aria-pressed") === "true") q.set("available_now", "true");
+  if ($("#f-cats").getAttribute("aria-pressed") === "true") q.set("cats_ok", "true");
   return q;
 }
 
-function renderSpotlight() {
-  const bar = $("#spotlight");
-  bar.hidden = !state.spotlight;
-  if (!state.spotlight) return;
-  const n = state.spotlight.ids.length;
-  bar.replaceChildren(`Showing ${n} listing${n === 1 ? "" : "s"} ${state.spotlight.label}`,
-    h("div", { class: "spacer" }),
-    h("button", { onclick: () => { state.spotlight = null; loadListings(); } }, "Back to all listings"));
+const setToggle = (button, on) => button.setAttribute("aria-pressed", on ? "true" : "false");
+
+/** Pick a value in a select, adding the option when the list does not have it yet. */
+function setSelect(select, value, label) {
+  if (![...select.options].some((o) => o.value === value)) select.append(h("option", { value }, label || value));
+  select.value = value;
 }
 
-async function loadListings() {
+function clearFilters() {
+  for (const id of ["f-text", "f-near", "f-max"]) $("#" + id).value = "";
+  for (const id of ["f-town", "f-beds", "f-source", "f-radius"]) $("#" + id).value = "";
+  $("#f-sort").value = "score";
+  setToggle($("#f-now"), false);
+  setToggle($("#f-cats"), false);
+}
+
+/** Set the whole filter bar from a filter object (from the assistant or smart search). */
+function applyFilters(f) {
+  clearFilters();
+  if (f.view && (state.admin || VISITOR_TABS.includes(f.view))) { state.view = f.view; renderTabs(); }
+  $("#f-text").value = f.text || f.keywords || "";
+  if (f.towns?.length) setSelect($("#f-town"), f.towns.join(","), f.towns.join(" + "));
+  if (f.min_beds !== undefined || f.max_beds !== undefined) {
+    const lo = f.min_beds ?? "", hi = f.max_beds ?? "";
+    const label = lo === hi ? (lo === 0 ? "Studio" : `${lo} beds`) : hi === "" ? `${lo}+ beds` : lo === "" ? `up to ${hi} beds` : `${lo}–${hi} beds`;
+    setSelect($("#f-beds"), `${lo}-${hi}`, label);
+  }
+  if (f.max_price) $("#f-max").value = f.max_price;
+  if (f.near) {
+    $("#f-near").value = f.near;
+    if (f.radius_miles) setSelect($("#f-radius"), String(f.radius_miles), `within ${f.radius_miles} mi`);
+  }
+  if (f.sort && [...$("#f-sort").options].some((o) => o.value === f.sort)) $("#f-sort").value = f.sort;
+  setToggle($("#f-now"), !!f.available_now);
+  setToggle($("#f-cats"), !!f.cats_ok);
+}
+
+/** The active filters as removable chips, so it is always clear what the list is showing. */
+function renderChips() {
+  const chips = [];
+  const chip = (label, clear) => chips.push(h("button", { class: "fchip", title: "Remove this filter",
+    onclick: () => { clear(); loadListings(); } }, label, h("span", {}, "✕")));
+  const selected = (id) => $("#" + id).selectedOptions[0]?.textContent;
+  if ($("#f-text").value.trim()) chip(`“${$("#f-text").value.trim()}”`, () => { $("#f-text").value = ""; });
+  if (state.center) chip(`within ${state.center.radius} mi of ${state.center.label}`, () => { $("#f-near").value = ""; $("#f-radius").value = ""; });
+  if ($("#f-town").value) chip(selected("f-town"), () => { $("#f-town").value = ""; });
+  if ($("#f-beds").value) chip(selected("f-beds"), () => { $("#f-beds").value = ""; });
+  if ($("#f-max").value) chip(`up to ${money($("#f-max").value)}`, () => { $("#f-max").value = ""; });
+  if ($("#f-source").value) chip(selected("f-source"), () => { $("#f-source").value = ""; });
+  if ($("#f-now").getAttribute("aria-pressed") === "true") chip("available now", () => setToggle($("#f-now"), false));
+  if ($("#f-cats").getAttribute("aria-pressed") === "true") chip("cats OK", () => setToggle($("#f-cats"), false));
+  const bar = $("#chips");
+  bar.hidden = !chips.length;
+  if (chips.length) bar.replaceChildren(h("span", { class: "muted" }, "Showing:"), ...chips,
+    h("button", { class: "link", onclick: () => { clearFilters(); loadListings(); } }, "Clear all"));
+}
+
+let smartBusy = false;
+async function smartSearch() {
+  const text = $("#f-text").value.trim();
+  if (!text || smartBusy) return;
+  smartBusy = true;
+  const button = $("#btn-smart");
+  button.disabled = true;
+  button.textContent = "Thinking…";
   try {
-    const data = await api("/api/listings?" + (state.spotlight
-      ? "ids=" + state.spotlight.ids.join(",") : filterQuery()));
+    const { filters } = await api("/api/smart-search", { method: "POST", body: { text } });
+    if (!Object.keys(filters).length) { toast("I couldn't turn that into filters, so it stays a text search"); }
+    else { applyFilters(filters); if (filters.near) setMap(true); }
+    await loadListings();
+  } catch (err) { toast(err.message); }
+  smartBusy = false;
+  button.disabled = false;
+  button.textContent = "✨ Smart search";
+}
+
+let loadSeq = 0;
+async function loadListings() {
+  const seq = ++loadSeq;
+  try {
+    const data = await api("/api/listings?" + filterQuery());
+    if (seq !== loadSeq) return;  // a newer search has already been sent
     state.listings = data.listings;
+    state.center = data.center || null;
     for (const l of data.listings) state.byId[l.id] = l;
     const sortBy = $("#f-sort").value;
-    if (sortBy.startsWith("near:") && !state.spotlight) {
+    if (sortBy.startsWith("near:") && !state.center) {
       const place = state.places.find((p) => p.name === sortBy.slice(5));
       if (place) state.listings.sort((a, b) => (milesTo(a, place) ?? 999) - (milesTo(b, place) ?? 999));
     }
-    renderSpotlight();
+    renderChips();
     $("#result-count").textContent = `${data.total} listing${data.total === 1 ? "" : "s"}`;
     renderGrid();
     if (state.mapOn) renderMap();
-  } catch (err) { toast(err.message); }
+  } catch (err) { if (seq === loadSeq) toast(err.message); }
 }
 
 function flagBadges(l) {
   const out = [];
   if (l.status === "new" && l.is_match) out.push(h("span", { class: "badge new" }, "NEW"));
   if (!l.active) out.push(h("span", { class: "badge bad" }, "No longer listed"));
+  else if (l.unverified) out.push(h("span", { class: "badge warn",
+    title: "The last hunt could not check the search or page this came from, so it may no longer be available." }, "Availability unverified"));
+  if (l.avail === "now") out.push(h("span", { class: "badge now", title: "Can be moved into right away" }, "⚡ Available now"));
+  else if (l.avail === "soon") out.push(h("span", { class: "badge", title: l.available || "" }, `Available ${l.available || "soon"}`));
+  if (l.cats_ok === "yes") out.push(h("span", { class: "badge cats" }, "🐾 Cats OK"));
+  else if (l.cats_ok === "one") out.push(h("span", { class: "badge warn", title: "The listing mentions a one-cat or one-pet limit" }, "🐾 One-cat limit?"));
   for (const flag of l.flags) {
     const kind = flag.startsWith("possible scam") ? "bad" : flag.startsWith("price drop") ? "good" : "warn";
     out.push(h("span", { class: "badge " + kind, title: flag }, flag.split(":")[0]));
@@ -186,7 +282,7 @@ function renderCard(l) {
   const price = l.match_price ?? l.price;
   const range = l.price_max && l.price_max > price;
   const stop = (fn) => (event) => { event.stopPropagation(); fn(); };
-  const distance = state.spotlight?.distances?.[l.id];
+  const distance = l.distance;
   return h("article", { class: "card" + (l.active ? "" : " inactive"), id: "card-" + l.id, onclick: () => openDetail(l.id) },
     h("div", { class: "photo", style: l.images[0] ? `background-image:url("${encodeURI(l.images[0])}")` : "" },
       l.images[0] ? "" : "🏠"),
@@ -257,6 +353,7 @@ function renderPlaces(places) {
     for (const p of places) select.append(h("option", { value: "near:" + p.name }, `Closest to ${p.name}`));
     select.value = [...select.options].some((o) => o.value === current) ? current : "score";
   }
+  $("#near-list").replaceChildren(...places.map((p) => h("option", { value: p.name })));
   if (changed && state.listings.length) { renderGrid(); if (state.mapOn) renderMap(); }
 }
 
@@ -291,11 +388,13 @@ function renderMap() {
   markerLayer.clearLayers();
   for (const id of Object.keys(markers)) delete markers[id];
   const points = [];
-  const spot = state.spotlight;
-  if (spot?.center) {
-    L.circleMarker([spot.center.lat, spot.center.lng], { radius: 9, color: "#fff", fillColor: "#1d4ed8", fillOpacity: 1, weight: 3 })
-      .bindTooltip(spot.center.label, { permanent: true, direction: "bottom", className: "home" }).addTo(markerLayer);
-    points.push([spot.center.lat, spot.center.lng]);
+  const center = state.center;
+  const spot = !!center || state.listings.length <= 25;  // few enough results to label every pin
+  if (center && !center.saved) {
+    L.circle([center.lat, center.lng], { radius: center.radius * 1609.34, color: "#1d4ed8", weight: 1, fillOpacity: 0.04, interactive: false }).addTo(markerLayer);
+    L.circleMarker([center.lat, center.lng], { radius: 9, color: "#fff", fillColor: "#1d4ed8", fillOpacity: 1, weight: 3 })
+      .bindTooltip(center.label, { permanent: true, direction: "bottom", className: "home" }).addTo(markerLayer);
+    points.push([center.lat, center.lng]);
   }
   for (const place of state.places) {  // each saved person/place, with 2- and 5-mile rings
     for (const [ringMiles, opacity] of [[2, 0.10], [5, 0.05]]) {
@@ -360,6 +459,10 @@ async function openDetail(id) {
             ? h("p", {}, h("strong", {}, `Match score ${l.score}/100. `), l.reasons.join(" · "))
             : h("p", { class: "muted" }, h("strong", {}, "Not a match: "), l.reasons.join(" · ")),
           l.flags.length ? h("p", { class: "muted" }, l.flags.join(" · ")) : null,
+          l.active && l.unverified ? h("p", { class: "muted" }, "Availability unverified: the last hunt could not check the search or page this listing came from. It is kept as it was last seen " + ago(l.last_seen) + ".") : null,
+          (l.also_listed || []).length ? [h("h3", {}, "Also listed"), h("div", { class: "badges" }, l.also_listed.map((c) =>
+            h("a", { href: c.url, target: "_blank", rel: "noopener", class: "badge" + (c.active ? "" : " bad"), title: c.title },
+              `${SOURCE_NAMES[c.source] || c.source}${c.price ? " · " + money(c.price) : ""}${c.active ? "" : " · gone"} ↗`)))] : null,
           l.units.length > 1 ? [h("h3", {}, "Floor plans"), h("table", {},
             h("tr", {}, h("th", {}, "Beds"), h("th", {}, "Rent"), h("th", {}, "Sq ft")),
             l.units.map((u) => h("tr", {},
@@ -389,8 +492,8 @@ async function openDetail(id) {
 }
 
 // ---------- chat ----------
-const SUGGESTIONS = ["What's new since yesterday?", "Show me the 5 best matches",
-  "What's the typical rent for a 2 bedroom in each town?", "I need a place that allows cats, under $2,000"];
+const SUGGESTIONS = ["What can I move into right now with my 2 cats?", "What's new since yesterday?",
+  "Anything available now near Jared?", "Draft a message to the landlord of the best match"];
 
 function richText(text) {
   const frag = document.createDocumentFragment();
@@ -403,7 +506,7 @@ function richText(text) {
       const id = Number(m[2]);
       const known = state.byId[id];
       if (!known) pendingRefs.add(id);
-      const distance = state.spotlight?.distances?.[id];
+      const distance = known?.distance;
       const lineStart = /(^|\n)[ \t>*•-]*$/.test(text.slice(0, m.index));
       if (!lineStart) {  // mentioned mid-sentence: a small link, so the sentence still reads naturally
         frag.append("(", h("a", { class: "ref", title: known ? known.title : "Show this listing",
@@ -499,11 +602,11 @@ async function askAssistant(text) {
         const event = JSON.parse(line);
         if (event.type === "text") { answer += event.delta; working.textContent = ""; redraw(); }
         else if (event.type === "tool") { working.textContent = event.label + "…"; redraw(); }
-        else if (event.type === "show") {
-          state.spotlight = { ids: event.ids, label: event.label, center: event.center, distances: event.distances };
-          shown = event.ids.length;
+        else if (event.type === "filters") {  // the assistant searched: mirror it in the filter bar
+          applyFilters(event.filters);
           await loadListings();
-          setMap(true);
+          shown = state.listings.length;
+          if (state.center) setMap(true);
           $("#content").scrollTo({ top: 0, behavior: "smooth" });
           redraw();
         }
@@ -548,7 +651,9 @@ async function openSettings() {
     minPrice: num(c.min_price, { step: 50 }), maxPrice: num(c.max_price, { step: 50 }),
     minBeds: num(c.min_beds, { min: 0, max: 6 }), maxBeds: num(c.max_beds, { min: 0, max: 6 }),
     minBaths: num(c.min_baths, { min: 0, step: 0.5 }), maxAge: num(c.max_age_days, { min: 1 }),
-    cats: check(c.cats), dogs: check(c.dogs),
+    cats: num(c.cats ? (c.cat_count || 1) : 0, { min: 0, max: 6 }), dogs: check(c.dogs),
+    moveIn: h("select", {}, h("option", { value: "any", selected: c.move_in !== "asap" }, "No rush"),
+      h("option", { value: "asap", selected: c.move_in === "asap" }, "As soon as possible")),
     must: h("input", { class: "wide", value: csv(c.must_have), placeholder: "e.g. parking, first floor" }),
     nice: h("input", { class: "wide", value: csv(c.nice_to_have) }),
     exclude: h("input", { class: "wide", value: csv(c.exclude) }),
@@ -557,6 +662,11 @@ async function openSettings() {
     clDetail: num(s.sources.craigslist.detail_fetch_limit, { min: 0, max: 100 }),
     rc: check(s.sources.rentcom.enabled), rcPages: num(s.sources.rentcom.pages_per_town, { min: 1, max: 5 }),
     watch: check(s.sources.watch.enabled),
+    rcast: check(s.sources.rentcast?.enabled), rcastHunt: num(s.sources.rentcast?.max_requests_per_hunt, { min: 1, max: 200 }),
+    rcastMonth: num(s.sources.rentcast?.max_requests_per_month, { min: 0 }),
+    rcastHours: num(s.sources.rentcast?.hours_between_checks, { min: 1 }),
+    mail: check(s.sources.mail?.enabled), mailSenders: h("input", { class: "wide", value: csv(s.sources.mail?.senders || []) }),
+    mailKeep: num(s.sources.mail?.keep_days, { min: 1 }),
     sched: check(s.schedule.enabled), interval: num(s.schedule.interval_hours, { min: 0.5, step: 0.5 }),
     quietStart: num(s.schedule.quiet_start, { min: 0, max: 23 }), quietEnd: num(s.schedule.quiet_end, { min: 0, max: 23 }),
     minScore: num(s.notify.min_score, { min: 0, max: 100 }),
@@ -567,12 +677,24 @@ async function openSettings() {
   };
 
   const watchList = h("div", {});
-  const drawWatches = (watches) => watchList.replaceChildren(...watches.map((w) => h("div", { class: "row" },
-    h("span", {}, w.label ? `${w.label}: ` : "", h("a", { href: w.url, target: "_blank", rel: "noopener" }, w.url)),
-    h("span", { class: "muted" }, w.last_status || "not read yet"),
-    h("button", { class: "link", onclick: async () => drawWatches(await api(`/api/watches/${w.id}`, { method: "DELETE" })) }, "Remove"))));
+  const drawWatches = (watches) => watchList.replaceChildren(...watches.map((w) => {
+    const [kind, stateName] = WATCH_STATES[w.state] || ["", w.last_checked ? "Read before update" : "Not read yet"];
+    const good = w.last_success ? `last good check ${ago(w.last_success)}` : (w.state ? "no good check yet" : "");
+    const useBrowser = h("input", { type: "checkbox", checked: !!w.render, onchange: async (e) => {
+      try { drawWatches(await api(`/api/watches/${w.id}`, { method: "PATCH", body: { render: e.target.checked } })); }
+      catch (err) { toast(err.message); e.target.checked = !e.target.checked; }
+    } });
+    return h("div", { class: "row watch" },
+      h("span", { class: "badge " + kind }, stateName),
+      h("span", { class: "grow" }, w.label ? `${w.label}: ` : "", h("a", { href: w.url, target: "_blank", rel: "noopener" }, w.url),
+        h("div", { class: "hint" }, [w.last_status || "will be read on the next hunt", good].filter(Boolean).join(" · "))),
+      h("label", { title: "Load this page in a headless browser, for pages that build their listings with JavaScript" }, useBrowser, "Use browser"),
+      h("button", { class: "link", onclick: async () => drawWatches(await api(`/api/watches/${w.id}`, { method: "DELETE" })) }, "Remove"));
+  }));
   drawWatches(data.watches);
-  const newWatch = { url: h("input", { placeholder: "https://… page that lists vacancies", size: 40 }), label: h("input", { placeholder: "Label (optional)" }) };
+  const newWatch = { url: h("input", { placeholder: "https://… page that lists vacancies", size: 40 }), label: h("input", { placeholder: "Label (optional)" }),
+    render: check(false) };
+  const rc = data.rentcast, ml = data.mail;
 
   const newPlace = { name: h("input", { placeholder: "Name, e.g. Mom" }), where: h("input", { placeholder: "Town or address", size: 28 }) };
   const collect = () => {
@@ -580,13 +702,19 @@ async function openSettings() {
     Object.assign(s.criteria, {
       min_price: +f.minPrice.value || 0, max_price: +f.maxPrice.value || 0,
       min_beds: +f.minBeds.value || 0, max_beds: +f.maxBeds.value || 0, min_baths: +f.minBaths.value || 0,
-      max_age_days: +f.maxAge.value || 30, cats: f.cats.checked, dogs: f.dogs.checked,
+      max_age_days: +f.maxAge.value || 30, cats: +f.cats.value > 0, cat_count: Math.max(1, +f.cats.value || 1),
+      dogs: f.dogs.checked, move_in: f.moveIn.value,
       must_have: uncsv(f.must.value), nice_to_have: uncsv(f.nice.value), exclude: uncsv(f.exclude.value),
       notes: f.notes.value.trim(),
     });
     Object.assign(s.sources.craigslist, { enabled: f.cl.checked, radius_miles: +f.clRadius.value || 4, detail_fetch_limit: +f.clDetail.value || 0 });
     Object.assign(s.sources.rentcom, { enabled: f.rc.checked, pages_per_town: +f.rcPages.value || 1 });
     s.sources.watch.enabled = f.watch.checked;
+    if (s.sources.rentcast) Object.assign(s.sources.rentcast, { enabled: f.rcast.checked,
+      max_requests_per_hunt: Math.max(1, +f.rcastHunt.value || 8), max_requests_per_month: Math.max(0, +f.rcastMonth.value || 0),
+      hours_between_checks: Math.max(1, +f.rcastHours.value || 168) });
+    if (s.sources.mail) Object.assign(s.sources.mail, { enabled: f.mail.checked, senders: uncsv(f.mailSenders.value),
+      keep_days: Math.max(1, +f.mailKeep.value || 21) });
     Object.assign(s.schedule, { enabled: f.sched.checked, interval_hours: Math.max(0.5, +f.interval.value || 4),
       quiet_start: +f.quietStart.value || 0, quiet_end: +f.quietEnd.value || 0 });
     Object.assign(s.notify, { min_score: +f.minScore.value || 0, webhook_url: f.webhook.value.trim() });
@@ -624,7 +752,8 @@ async function openSettings() {
       h("div", { class: "row" }, field("Min rent $", f.minPrice), field("Max rent $", f.maxPrice),
         field("Min beds (0 = studio)", f.minBeds), field("Max beds", f.maxBeds), field("Min baths", f.minBaths),
         field("Ignore posts older than (days)", f.maxAge)),
-      h("div", { class: "row" }, h("label", {}, f.cats, "Must allow cats"), h("label", {}, f.dogs, "Must allow dogs")),
+      h("div", { class: "row" }, field("I need to move", f.moveIn), field("Cats coming with me (0 = none)", f.cats),
+        h("label", {}, f.dogs, "Must allow dogs")),
       h("div", { class: "row" }, field("Must have (comma separated; listings that don't mention these are dropped)", f.must, "wide-field")),
       h("div", { class: "row" }, field("Nice to have (raises the score)", f.nice, "wide-field")),
       h("div", { class: "row" }, field("Exclude listings that mention", f.exclude, "wide-field")),
@@ -634,15 +763,29 @@ async function openSettings() {
       h("div", { class: "row" }, h("label", {}, f.cl, "Craigslist"), field("Radius around each town (miles)", f.clRadius),
         field("Full posts to read per hunt", f.clDetail)),
       h("div", { class: "row" }, h("label", {}, f.rc, "Rent.com"), field("Result pages per town", f.rcPages)),
+      rc ? [h("div", { class: "row" }, h("label", {}, f.rcast, "RentCast (paid API, optional)"),
+          field("Requests per hunt, at most", f.rcastHunt), field("Requests per month, at most", f.rcastMonth),
+          field("Hours between checks of a town", f.rcastHours)),
+        h("p", { class: "hint" + (f.rcast.checked && !rc.key_present ? " trouble" : "") },
+          (rc.key_present ? "API key found. " : `No API key: set ${rc.key_env} in the environment or the .env file, then restart RentHunt. `) +
+          `${rc.used} of ${rc.monthly_budget} requests used since ${rc.period_start}. Each town costs one request per check.`)] : null,
+      ml ? [h("div", { class: "row" }, h("label", {}, f.mail, "Email alerts (Zillow, Apartments.com and others)"),
+          field("Keep a listing for (days after its last alert)", f.mailKeep)),
+        h("div", { class: "row" }, field("Read alerts from these senders", f.mailSenders, "wide-field")),
+        h("p", { class: "hint" + (f.mail.checked && !ml.ready ? " trouble" : "") },
+          (ml.ready ? `Mailbox sign-in found (${ml.via}). ` : ml.token_missing ? "The Google token file named in the settings is missing. " : `No mailbox sign-in: set ${ml.user_env} and ${ml.password_env} in the .env file, then restart RentHunt. `) +
+          "Save a search on each site and have it email you; your local model reads the alerts. The mailbox is only read, never changed." +
+          (ml.last_note ? ` Last check: ${ml.last_note}.` : ""))] : null,
       h("div", { class: "row" }, h("label", {}, f.watch, "Watched pages"),
-        h("span", { class: "hint" }, "Any page that lists vacancies (a local landlord, a housing authority). Your local model reads it on each hunt.")),
+        h("span", { class: "hint" }, "Any page that lists vacancies (a property manager, a housing authority). Listings the page states in a structured form are read directly; otherwise your local model reads it.")),
       watchList,
-      h("div", { class: "row" }, newWatch.url, newWatch.label, h("button", { onclick: async () => {
+      h("div", { class: "row" }, newWatch.url, newWatch.label, h("label", {}, newWatch.render, "Use browser"), h("button", { onclick: async () => {
         try {
-          drawWatches(await api("/api/watches", { method: "POST", body: { url: newWatch.url.value, label: newWatch.label.value } }));
-          newWatch.url.value = newWatch.label.value = "";
+          drawWatches(await api("/api/watches", { method: "POST", body: { url: newWatch.url.value, label: newWatch.label.value, render: newWatch.render.checked } }));
+          newWatch.url.value = newWatch.label.value = ""; newWatch.render.checked = false;
         } catch (err) { toast(err.message); }
       } }, "Watch page")),
+      data.browser === false ? h("p", { class: "hint" }, "“Use browser” needs the optional browser (Playwright), which is not installed here. The README has the two commands.") : null,
 
       h("h3", {}, "People and places to be near"),
       h("p", { class: "hint" }, "Each one adds a distance badge to every listing, a marker with 2- and 5-mile rings on the map, and a “Closest to…” sort. Only you see these."),
@@ -678,6 +821,7 @@ async function openSettings() {
       runs.length ? runs.slice(0, 8).map((r) => h("details", {},
         h("summary", {}, `${new Date(r.started_at).toLocaleString()} · ${r.trigger} · ${r.status}` +
           (r.summary.new !== undefined ? ` · ${r.summary.new} new listings, ${r.summary.new_matches} alerts` : "")),
+        runProblems(r.summary).map((line) => h("p", { class: "hint trouble" }, "Not checked: " + line)),
         h("pre", { class: "log" }, r.log || "(still running)"))) : h("p", { class: "hint" }, "No hunts yet.")),
     h("div", { class: "dlg-foot" }, h("button", { onclick: () => dlg.close() }, "Cancel"), h("button", { class: "primary", onclick: save }, "Save")));
   if (!dlg.open) dlg.showModal();
@@ -758,8 +902,18 @@ $("#chat-input").onkeydown = (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#chat-form").requestSubmit(); }
 };
 let filterTimer;
-for (const id of ["f-text", "f-town", "f-beds", "f-max", "f-source", "f-sort"]) {
-  $("#" + id).addEventListener("input", () => { state.spotlight = null; clearTimeout(filterTimer); filterTimer = setTimeout(loadListings, 250); });
+const reloadSoon = (delay = 250) => { clearTimeout(filterTimer); filterTimer = setTimeout(loadListings, delay); };
+for (const id of ["f-text", "f-town", "f-beds", "f-max", "f-source", "f-sort", "f-radius"]) {
+  $("#" + id).addEventListener("input", () => reloadSoon());
 }
+$("#f-near").addEventListener("input", () => reloadSoon(900));  // wait for the typing to stop before looking a street up
+for (const id of ["f-now", "f-cats"]) {
+  $("#" + id).onclick = (e) => { setToggle(e.currentTarget, e.currentTarget.getAttribute("aria-pressed") !== "true"); loadListings(); };
+}
+$("#btn-smart").onclick = smartSearch;
+$("#f-text").addEventListener("keydown", (e) => {
+  // A full sentence is handed to the assistant; a word or two stays a plain text search.
+  if (e.key === "Enter" && state.admin && e.target.value.trim().split(/\s+/).length >= 3) { e.preventDefault(); smartSearch(); }
+});
 
 start();

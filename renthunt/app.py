@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import actions, ai, chat, config, db, hunt
+from .sources import mail, rentcast, render
 
 
 async def scheduler() -> None:
@@ -139,6 +140,8 @@ def listings(
     min_price: int | None = None, max_price: int | None = None,
     min_beds: float | None = None, max_beds: float | None = None,
     text: str | None = None, sort: str = "score", ids: str | None = None,
+    near: str | None = None, radius_miles: float | None = None,
+    available_now: bool = False, cats_ok: bool = False,
     limit: int = Query(300, le=1000), offset: int = 0,
 ):
     admin = request.state.admin
@@ -152,17 +155,34 @@ def listings(
         return {"total": len(rows), "listings": rows}
     if not admin and view not in VISITOR_VIEWS:
         view = "matches"
-    rows, total = db.query_listings(
-        search_notes=admin,
-        view=view, towns=_split(towns), sources=_split(sources), min_price=min_price,
-        max_price=max_price, min_beds=min_beds, max_beds=max_beds, text=text or None,
-        sort=sort, limit=limit, offset=offset,
-    )
-    for row in rows:
+    if not admin:
+        near = None  # street lookups call an outside service; not for anonymous visitors
+    try:
+        found = actions.search(
+            near=near, radius_miles=radius_miles, sort=sort, limit=limit,
+            search_notes=admin, view=view, towns=_split(towns), sources=_split(sources),
+            min_price=min_price, max_price=max_price, min_beds=min_beds, max_beds=max_beds,
+            text=text or None, available_now=available_now, cats_ok=cats_ok, offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    for row in found["listings"]:
         row["description"] = (row["description"] or "")[:300]
         if not admin:
             _for_visitor(row)
-    return {"total": total, "listings": rows}
+    return found
+
+
+@app.post("/api/smart-search")
+def smart_search(body: dict = Body(...)):
+    """Plain words in, filter settings out (uses the local model)."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Type what you are looking for")
+    try:
+        return {"filters": ai.smart_filters(db.get_settings(), text[:400])}
+    except Exception as exc:
+        raise HTTPException(502, ai.describe_error(exc)) from exc
 
 
 @app.get("/api/listings/{listing_id}")
@@ -198,13 +218,18 @@ def overview(request: Request):
         data["places"] = []  # where the owner's people live is not for visitors
         data["counts"].update(favorites=0, pipeline=0, hidden=0)
         data["ai"] = {"ok": data["ai"]["ok"], "model": "", "model_installed": True}
+        if data["last_run"]:  # which pages and searches had trouble is the owner's business
+            summary = data["last_run"]["summary"] or {}
+            data["last_run"]["summary"] = {k: summary[k] for k in ("new", "new_matches") if k in summary}
     return data
 
 
 @app.get("/api/settings")
 def get_settings():
     settings = db.get_settings()
-    return {"settings": settings, "watches": actions.list_watches(), "ai": ai.status(settings, fresh=True)}
+    return {"settings": settings, "watches": actions.list_watches(), "ai": ai.status(settings, fresh=True),
+            "browser": render.available(), "rentcast": rentcast.status(settings),
+            "mail": mail.status(settings)}
 
 
 @app.put("/api/settings")
@@ -244,9 +269,15 @@ def delete_place(name: str):
 @app.post("/api/watches")
 def add_watch(body: dict = Body(...)):
     try:
-        actions.add_watch(body.get("url", ""), body.get("label", ""))
+        actions.add_watch(body.get("url", ""), body.get("label", ""), bool(body.get("render")))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    return actions.list_watches()
+
+
+@app.patch("/api/watches/{watch_id}")
+def patch_watch(watch_id: int, body: dict = Body(...)):
+    actions.update_watch(watch_id, render=body.get("render"), enabled=body.get("enabled"))
     return actions.list_watches()
 
 

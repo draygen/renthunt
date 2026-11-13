@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 
-from .base import Fetcher, Log, enabled_towns
+from .base import Fetcher, Log, SourceResult, enabled_towns
 
 STATE_SLUGS = {"MA": "massachusetts", "NH": "new-hampshire"}
 IMAGE_URL = "https://i.rent.com/t_3x2_fixed_webp_md/{id}"
@@ -75,15 +75,18 @@ def parse_search(html: str) -> list[dict]:
     return items
 
 
-def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
+def fetch(settings: dict, fetcher: Fetcher, log: Log) -> SourceResult:
     pages = max(1, int(settings["sources"]["rentcom"].get("pages_per_town", 1)))
     wanted = {t["name"].lower(): t for t in enabled_towns(settings)}
     items: dict[str, dict] = {}
-    errors = 0
+    result = SourceResult()
     for town in enabled_towns(settings):
+        scope = f"town:{town['name']}"
+        result.labels[scope] = town["name"]
         state_slug = STATE_SLUGS.get(town.get("state", "MA"))
         if not state_slug:
             log(f"rent.com: no state mapping for {town['name']}, skipping")
+            result.skipped[scope] = "no state mapping"
             continue
         slug = re.sub(r"[^a-z0-9]+", "-", town["name"].lower()).strip("-")
         for page in range(1, pages + 1):
@@ -93,7 +96,8 @@ def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
                 resp.raise_for_status()
                 found = parse_search(resp.text)
             except Exception as exc:
-                errors += 1
+                # Results from earlier pages are kept, but the town was not read in full.
+                result.failed[scope] = f"page {page}: {str(exc)[:200]}"
                 log(f"rent.com: {town['name']} page {page} failed: {exc}")
                 break
             kept = 0
@@ -102,12 +106,14 @@ def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
                 if not match:
                     continue  # result pages pad out with neighbouring towns
                 item["town"] = match["name"]
+                item["scope"] = scope
                 if item["source_id"] not in items:
                     kept += 1
                 items.setdefault(item["source_id"], item)
             log(f"rent.com: {town['name']} page {page}: {len(found)} results, {kept} new in your towns")
             if kept == 0:
                 break
-    if errors and not items:
-        raise RuntimeError("every Rent.com search failed")
-    return list(items.values())
+        if scope not in result.failed:
+            result.checked.add(scope)
+    result.items = list(items.values())
+    return result

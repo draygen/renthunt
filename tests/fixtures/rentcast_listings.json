@@ -1,0 +1,33 @@
+[
+  {
+    "id": "12-Pine-St,-Unit-3,-Lowell,-MA-01851",
+    "formattedAddress": "12 Pine St, Unit 3, Lowell, MA 01851",
+    "addressLine1": "12 Pine St", "addressLine2": "Unit 3",
+    "city": "Lowell", "state": "MA", "zipCode": "01851", "county": "Middlesex",
+    "latitude": 42.63, "longitude": -71.33,
+    "propertyType": "Apartment", "bedrooms": 2, "bathrooms": 1, "squareFootage": 900, "yearBuilt": 1920,
+    "status": "Active", "price": 1850, "listingType": "Standard",
+    "listedDate": "2026-11-02T00:00:00.000Z", "removedDate": null,
+    "createdDate": "2026-11-02T00:00:00.000Z", "lastSeenDate": "2026-11-12T10:00:00.000Z",
+    "daysOnMarket": 11, "mlsName": "MLSPIN", "mlsNumber": "73000001",
+    "listingAgent": {"name": "Pat Example", "phone": "9785550101", "email": "pat@example.test"},
+    "listingOffice": {"name": "Example Realty", "phone": "9785550102"}
+  },
+  {
+    "id": "12-Pine-St,-Unit-4,-Lowell,-MA-01851",
+    "formattedAddress": "12 Pine St, Unit 4, Lowell, MA 01851",
+    "addressLine1": "12 Pine St", "addressLine2": "Unit 4",
+    "city": "Lowell", "state": "MA", "zipCode": "01851",
+    "latitude": 42.63, "longitude": -71.33,
+    "propertyType": "Apartment", "bedrooms": 2, "bathrooms": 1, "squareFootage": 900,
+    "status": "Active", "price": 1850, "listedDate": "2026-11-05T00:00:00.000Z", "daysOnMarket": 8
+  },
+  {
+    "id": "9-Far-Rd,-Springfield,-MA-01101",
+    "formattedAddress": "9 Far Rd, Springfield, MA 01101",
+    "addressLine1": "9 Far Rd", "addressLine2": null,
+    "city": "Springfield", "state": "MA", "zipCode": "01101",
+    "propertyType": "Single Family", "bedrooms": 3, "bathrooms": 2,
+    "status": "Active", "price": 2100
+  }
+]

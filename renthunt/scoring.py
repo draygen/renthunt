@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 # A phrase in the criteria also counts when one of these appears in the listing.
 SYNONYMS = {
@@ -27,6 +27,62 @@ PET_OK = {
              "pet friendly", "pets allowed", "pets ok", "pets welcome", "dogs welcome"],
 }
 PET_NO = {"cats": ["no cats", "dogs only"], "dogs": ["no dogs", "cats only", "cat only"]}
+
+
+ONE_CAT = re.compile(
+    r"\b(one|1|single)\s+(cat|pet)\b|\bmax(imum)?\.?\s*(of\s*)?(1|one)\s*(cat|pet)|"
+    r"\b(cat|pet)s?\s*(limit|max)\w*\s*(of|to|:)?\s*(1|one)\b|\b(1|one)\s+(cat|pet)\s+(max|only|limit)")
+AVAILABLE_NOW = ["available now", "avail now", "available immediately", "immediate occupancy",
+                 "immediate move", "move in today", "move-in ready", "move in ready", "ready now",
+                 "available today", "available asap", "vacant"]
+DATE_IN_TEXT = re.compile(r"avail(?:able)?(?:\s+date)?\s*[:\-]?\s*(\d{1,2}/\d{1,2}(?:/\d{2,4})?)")
+
+
+def _parse_day(text: str, today: date) -> date | None:
+    """Read 'dec 1', 'December 1st', '12/01', '09/15/2026' and the like."""
+    text = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", text.strip().lower()).replace(",", " ")
+    text = " ".join(text.split())
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%b %d %Y", "%B %d %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    for fmt in ("%m/%d", "%b %d", "%B %d"):
+        try:
+            day = datetime.strptime(f"{text} 2000", f"{fmt} %Y").date().replace(year=today.year)
+        except ValueError:
+            continue
+        # A bare "jan 1" seen in November means next January.
+        return day.replace(year=today.year + 1) if (today - day).days > 120 else day
+    return None
+
+
+def availability(listing: dict, today: date | None = None) -> str:
+    """'now', 'soon' (within about a month), 'later', or 'unknown'."""
+    today = today or date.today()
+    raw = (listing.get("available") or "").lower().strip()
+    text = f"{listing.get('title') or ''} {(listing.get('description') or '')[:2000]}".lower()
+    day = None
+    if raw:
+        if any(word in raw for word in ("now", "today", "immediate", "unit")):
+            return "now"
+        day = _parse_day(raw, today)
+    if day is None:
+        found = DATE_IN_TEXT.search(text)
+        day = _parse_day(found.group(1), today) if found else None
+    if day is not None:
+        wait = (day - today).days
+        return "now" if wait <= 3 else "soon" if wait <= 35 else "later"
+    return "now" if any(p in text for p in AVAILABLE_NOW) else "unknown"
+
+
+def cat_policy(text: str) -> str:
+    """'yes', 'one' (a one-cat limit is mentioned), 'no', or 'unknown'."""
+    if any(p in text for p in PET_NO["cats"] + NO_PETS):
+        return "no"
+    if ONE_CAT.search(text):
+        return "one"
+    return "yes" if any(p in text for p in PET_OK["cats"]) else "unknown"
 
 
 def _has(text: str, phrase: str) -> bool:
@@ -102,16 +158,37 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
             bad.append(f'no mention of "{phrase}"')
 
     pets_confirmed = 0
-    for pet in ("cats", "dogs"):
-        if not c.get(pet):
-            continue
-        if any(p in text for p in PET_NO[pet] + NO_PETS):
-            bad.append(f"{pet} not allowed")
-        elif any(p in text for p in PET_OK[pet]):
-            good.append(f"{pet} OK")
+    cats = cat_policy(text)
+    cat_count = int(c.get("cat_count") or 1)
+    cat_penalty = 0
+    if c.get("cats"):
+        if cats == "no":
+            bad.append("cats not allowed")
+        elif cats == "one" and cat_count >= 2:
+            flags.append(f"may allow only one cat (you have {cat_count})")
+            cat_penalty = 12
+        elif cats in ("yes", "one"):
+            good.append("cats OK")
+            pets_confirmed += 1
+            if cat_count >= 2:
+                flags.append(f"confirm {cat_count} cats are OK")
+        else:
+            flags.append("pet policy unknown")
+    if c.get("dogs"):
+        if any(p in text for p in PET_NO["dogs"] + NO_PETS):
+            bad.append("dogs not allowed")
+        elif any(p in text for p in PET_OK["dogs"]):
+            good.append("dogs OK")
             pets_confirmed += 1
         else:
             flags.append("pet policy unknown")
+
+    avail = availability(listing)
+    asap = c.get("move_in") == "asap"
+    if asap and avail == "later":
+        bad.append(f"not available until {listing.get('available') or 'later'}")
+    elif avail == "now":
+        good.append("available now")
 
     age = _age_days(listing)
     if listing.get("posted_at") and age is not None and c.get("max_age_days") and age > c["max_age_days"]:
@@ -134,7 +211,12 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
         score += 15 if age <= 1 else 12 if age <= 3 else 8 if age <= 7 else 4 if age <= 14 else 0
     score += 5 if listing.get("images") else 0
     score += 5 if (listing.get("sqft") or len(listing.get("description") or "") > 200) else 0
-    score = min(100.0, score + 2.5 * pets_confirmed)
+    score += 2.5 * pets_confirmed - cat_penalty
+    if asap:  # when the move is urgent, being ready now matters more than polish
+        score += {"now": 15, "soon": 4, "unknown": -6}.get(avail, 0)
+        if avail == "unknown":
+            flags.append("move-in date not stated")
+    score = max(0.0, min(100.0, score))
 
     # --- warnings ---
     if any(p in text for p in SCAM_PHRASES):
@@ -156,4 +238,6 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
         "score": round(score) if is_match else 0,
         "reasons": good if is_match else bad,
         "flags": sorted(set(flags)),
+        "avail": avail,
+        "cats_ok": cats,
     }

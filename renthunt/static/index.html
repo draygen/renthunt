@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="author" content="Draygen aka Brian Wallace">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f766e">
+<meta name="theme-color" content="#060910">
 <title>RentHunt</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏠</text></svg>">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -27,26 +27,37 @@
   <section id="content">
     <nav id="tabs"></nav>
     <div id="filters">
-      <input id="f-text" type="search" placeholder="Search title, description, notes…">
+      <div class="smart">
+        <input id="f-text" type="search" placeholder="Search, or just say it: “2 bed near Jared under $1,900, available now”">
+        <button id="btn-smart" class="primary admin-only" title="The assistant turns your words into filters">✨ Smart search</button>
+      </div>
+      <input id="f-near" class="admin-only" type="search" placeholder="Near: street, address, name…" list="near-list">
+      <datalist id="near-list"></datalist>
+      <select id="f-radius" class="admin-only" title="How far from that place">
+        <option value="">Auto radius</option><option value="1">within 1 mi</option><option value="2">within 2 mi</option>
+        <option value="3">within 3 mi</option><option value="5">within 5 mi</option><option value="10">within 10 mi</option>
+      </select>
       <select id="f-town"><option value="">All towns</option></select>
       <select id="f-beds">
-        <option value="">Any beds</option><option value="0">Studio</option>
-        <option value="1">1 bed</option><option value="2">2 beds</option>
-        <option value="3">3 beds</option><option value="4">4+ beds</option>
+        <option value="">Any beds</option><option value="0-0">Studio</option>
+        <option value="1-1">1 bed</option><option value="2-2">2 beds</option>
+        <option value="3-3">3 beds</option><option value="2-">2+ beds</option><option value="3-">3+ beds</option>
       </select>
       <input id="f-max" type="number" min="0" step="50" placeholder="Max $">
       <select id="f-source">
         <option value="">All sources</option><option value="craigslist">Craigslist</option>
-        <option value="rentcom">Rent.com</option><option value="watch">Watched pages</option>
+        <option value="rentcom">Rent.com</option><option value="rentcast">RentCast</option><option value="mail">Email alerts</option><option value="watch">Watched pages</option>
       </select>
       <select id="f-sort">
         <option value="score">Best match</option><option value="newest">Newest</option>
         <option value="price_asc">Rent: low to high</option><option value="price_desc">Rent: high to low</option>
       </select>
+      <button id="f-now" class="toggle" aria-pressed="false">⚡ Available now</button>
+      <button id="f-cats" class="toggle" aria-pressed="false">🐾 Cats OK</button>
       <span id="result-count"></span>
       <button id="btn-seen" class="link admin-only" title="Clear the NEW badge from every listing">Mark all seen</button>
     </div>
-    <div id="spotlight" hidden></div>
+    <div id="chips" hidden></div>
     <div id="map" hidden></div>
     <div id="grid"></div>
   </section>

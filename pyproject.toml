@@ -11,6 +11,9 @@ dependencies = [
     "beautifulsoup4>=4.12",
 ]
 
+[project.optional-dependencies]
+browser = ["playwright>=1.45"]  # only for watched pages that need JavaScript
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

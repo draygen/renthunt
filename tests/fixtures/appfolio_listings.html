@@ -1,0 +1,57 @@
+<!-- Fixture: the markup of an AppFolio listings page (<company>.appfolio.com/listings),
+     cut down to three units. Addresses and rents are invented. -->
+<html><head><title>Current Listings</title></head><body>
+<h1>Current Listings</h1>
+<div id='result_container' class="listings js-listings-container">
+  <div class="listing-item result js-listing-item" id="listing_309">
+    <div class="listing-item__figure-container">
+      <a href="/listings/detail/aaaa1111" target="_blank">
+        <img class="listing-item__image lazy js-listing-image" data-original="https://images.example.test/a/medium.jpg" alt="" src="placeholder.png" />
+        <div class="sidebar__price rent-banner__text js-listing-blurb-rent"> $1,925 </div>
+        <span class="rent-banner__text js-listing-blurb-bed-bath"> 1 bd / 1 ba </span>
+      </a>
+    </div>
+    <div class="listing-item__body">
+      <h2 class="listing-item__title js-listing-title"><a href="/listings/detail/aaaa1111" target="_blank">Bright 1 Bedroom by the River</a></h2>
+      <p class="u-space-an"><span class="u-pad-rm js-listing-address">58 Elm St., Apt. 108, Lowell, MA 01852</span></p>
+      <p class="u-space-an">
+        <span class="js-listing-square-feet">Square Feet: 732</span>
+        <span class="js-listing-available">Available 12/1/26</span>
+      </p>
+      <p class="hand-hidden tablet-hidden u-space-ts js-listing-description">Private deck, dishwasher. Cats ok.</p>
+    </div>
+  </div>
+  <div class="listing-item result js-listing-item" id="listing_310">
+    <div class="listing-item__figure-container">
+      <a href="/listings/detail/bbbb2222" target="_blank">
+        <div class="sidebar__price rent-banner__text js-listing-blurb-rent"> $2,250 </div>
+        <span class="rent-banner__text js-listing-blurb-bed-bath"> 2 bd / 1 ba </span>
+      </a>
+    </div>
+    <div class="listing-item__body">
+      <h2 class="listing-item__title js-listing-title"><a href="/listings/detail/bbbb2222" target="_blank">2 Bedroom Apartment</a></h2>
+      <p class="u-space-an"><span class="u-pad-rm js-listing-address">58 Elm St., Apt. 210, Lowell, MA 01852</span></p>
+      <p class="u-space-an"><span class="js-listing-available">Available Now</span></p>
+    </div>
+  </div>
+  <div class="listing-item result js-listing-item" id="listing_311">
+    <div class="listing-item__figure-container">
+      <a href="/listings/detail/cccc3333" target="_blank">
+        <div class="sidebar__price rent-banner__text js-listing-blurb-rent"> $1,700 </div>
+        <span class="rent-banner__text js-listing-blurb-bed-bath"> Studio / 1 ba </span>
+      </a>
+    </div>
+    <div class="listing-item__body">
+      <h2 class="listing-item__title js-listing-title"><a href="/listings/detail/cccc3333" target="_blank">Studio far away</a></h2>
+      <p class="u-space-an"><span class="u-pad-rm js-listing-address">40 Route 27, Apt. 1, Raymond, NH 03077</span></p>
+    </div>
+  </div>
+</div>
+<script type="text/javascript">
+    window.googleMap = new GoogleMap({
+      container: 'googlemap',
+      markers: [{"latitude":42.6401,"longitude":-71.3101,"address":"58 Elm St., Apt. 108, Lowell, MA 01852","listing_id":309}],
+      infoWindowTemplate: 'x'
+    });
+</script>
+</body></html>

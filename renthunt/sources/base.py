@@ -3,13 +3,19 @@
 Every source returns a list of plain dicts ("items") with these keys (all but the
 first four optional): source, source_id, url, title, town, state, address, lat, lng,
 units [{beds, price_low, price_high, sqft}], baths, sqft, description, images,
-amenities, contact, posted_at, available.
+amenities, contact, posted_at, available, scope.
+
+`scope` names the one search or page that produced the item ("town:Lowell", "w3").
+A source's fetch() returns a SourceResult saying which scopes were read completely and
+which could not be, so the hunt only counts a listing as missing when the search that
+would have shown it really ran.
 """
 from __future__ import annotations
 
 import math
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Callable
 
 import httpx
@@ -19,16 +25,37 @@ from .. import config
 Log = Callable[[str], None]
 
 
+@dataclass
+class SourceResult:
+    """What one source found, and how much of it could actually be checked."""
+    items: list[dict] = field(default_factory=list)
+    # Scopes read completely: a listing missing from one of these is really gone from it.
+    checked: set[str] = field(default_factory=set)
+    # Scopes confirmed identical to their last good read: their listings still stand.
+    unchanged: set[str] = field(default_factory=set)
+    # Scopes that could not be read, or only partly: {scope: reason}. Their listings are
+    # kept and shown as unverified.
+    failed: dict[str, str] = field(default_factory=dict)
+    # Scopes deliberately not attempted this time (not due, out of budget): {scope: reason}.
+    skipped: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)  # scope -> name for messages
+    note: str = ""  # one line about the source as a whole, shown with the run
+
+    def problems(self) -> list[str]:
+        return [f"{self.labels.get(scope, scope)}: {reason}" for scope, reason in self.failed.items()]
+
+
 class Fetcher:
     """HTTP client that spaces requests out so we stay a light, polite visitor."""
 
-    def __init__(self, delay: float, log: Log):
-        self.delay = max(0.5, float(delay))
+    def __init__(self, delay: float, log: Log, transport: httpx.BaseTransport | None = None,
+                 min_delay: float = 0.5):
+        self.delay = max(min_delay, float(delay))
         self.log = log
         self._last = 0.0
         self.client = httpx.Client(
             headers={"User-Agent": config.USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-            follow_redirects=True, timeout=30,
+            follow_redirects=True, timeout=30, transport=transport,
         )
 
     def get(self, url: str, params: dict | None = None) -> httpx.Response:

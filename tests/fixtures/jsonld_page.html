@@ -1,0 +1,14 @@
+<!-- Fixture: a small landlord page that describes its vacancies with schema.org JSON-LD. -->
+<html><head>
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@graph": [
+  {"@type": "Organization", "name": "Mill City Rentals", "telephone": "978-555-0100"},
+  {"@type": "Apartment", "name": "12 Pine St Unit 3", "url": "/units/12-pine-3",
+   "address": {"@type": "PostalAddress", "streetAddress": "12 Pine St Unit 3", "addressLocality": "Lowell", "addressRegion": "MA", "postalCode": "01851"},
+   "numberOfBedrooms": 2, "numberOfBathroomsTotal": 1, "floorSize": {"@type": "QuantitativeValue", "value": 900},
+   "geo": {"@type": "GeoCoordinates", "latitude": 42.63, "longitude": -71.33},
+   "offers": {"@type": "Offer", "price": "1850", "priceCurrency": "USD"}},
+  {"@type": "Apartment", "name": "Coming soon", "address": "1 Nowhere Rd, Lowell, MA"}
+]}
+</script></head>
+<body><h1>Mill City Rentals</h1><p>Welcome to our site. Call us about the homes we manage in Greater Lowell and the Merrimack Valley, we would be glad to show you around any weekday afternoon.</p></body></html>

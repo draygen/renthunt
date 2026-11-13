@@ -7,7 +7,7 @@ from collections import defaultdict
 
 from bs4 import BeautifulSoup
 
-from .base import Fetcher, Log, assign_town, enabled_towns, parse_price
+from .base import Fetcher, Log, SourceResult, assign_town, enabled_towns, parse_price
 
 SEARCH_URL = "https://boston.craigslist.org/search/apa"
 GONE_MARKERS = ("this posting has been deleted", "this posting has been flagged", "this posting has expired")
@@ -58,7 +58,7 @@ def parse_search(html: str) -> list[dict]:
     return results
 
 
-def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
+def fetch(settings: dict, fetcher: Fetcher, log: Log) -> SourceResult:
     cfg = settings["sources"]["craigslist"]
     criteria = settings["criteria"]
     params = {"search_distance": cfg.get("radius_miles", 4), "sort": "date"}
@@ -73,17 +73,20 @@ def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
 
     wanted = {t["name"] for t in enabled_towns(settings)}
     items: dict[str, dict] = {}
-    errors = 0
+    result = SourceResult()
     for town in enabled_towns(settings):
+        scope = f"town:{town['name']}"
+        result.labels[scope] = town["name"]
         if not town.get("zip"):
             log(f"craigslist: {town['name']} has no ZIP code, skipping")
+            result.skipped[scope] = "no ZIP code"
             continue
         try:
             resp = fetcher.get(SEARCH_URL, {**params, "postal": town["zip"]})
             resp.raise_for_status()
             found = parse_search(resp.text)
         except Exception as exc:  # one town failing should not sink the others
-            errors += 1
+            result.failed[scope] = str(exc)[:200]
             log(f"craigslist: {town['name']} failed: {exc}")
             continue
         kept = 0
@@ -92,13 +95,14 @@ def fetch(settings: dict, fetcher: Fetcher, log: Log) -> list[dict]:
             if not match or match["name"] not in wanted:
                 continue
             item["town"], item["state"] = match["name"], match.get("state", "MA")
+            item["scope"] = scope
             if item["source_id"] not in items:
                 kept += 1
             items.setdefault(item["source_id"], item)
+        result.checked.add(scope)
         log(f"craigslist: {town['name']}: {len(found)} results, {kept} new in your towns")
-    if errors and not items:
-        raise RuntimeError("every Craigslist search failed")
-    return list(items.values())
+    result.items = list(items.values())
+    return result
 
 
 def fetch_detail(url: str, fetcher: Fetcher) -> dict | None:

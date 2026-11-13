@@ -91,9 +91,32 @@ def connect():
         conn.close()
 
 
+# Columns added after the first release: (table, column, definition). Existing databases
+# gain them on start-up; nothing is ever dropped or rewritten.
+MIGRATIONS = (
+    ("listings", "avail", "TEXT"),
+    ("listings", "cats_ok", "TEXT"),
+    ("listings", "scope", "TEXT"),                           # the search or page that last showed it
+    ("listings", "unverified", "INTEGER NOT NULL DEFAULT 0"),  # 1 = its search could not be checked
+    ("watch_urls", "render", "INTEGER NOT NULL DEFAULT 0"),  # 1 = load in the headless browser
+    ("watch_urls", "state", "TEXT"),                         # ok, empty, partial, blocked, incomplete, failed
+    ("watch_urls", "last_success", "TEXT"),
+    ("watch_urls", "last_count", "INTEGER"),
+    ("watch_urls", "method", "TEXT"),
+)
+
+
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        for table in sorted({m[0] for m in MIGRATIONS}):
+            have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for _, column, definition in (m for m in MIGRATIONS if m[0] == table):
+                if column not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        # Watched-page listings carry their page in the id ("w3-..."); give older rows a scope.
+        conn.execute("UPDATE listings SET scope = substr(source_id, 1, instr(source_id, '-') - 1) "
+                     "WHERE source='watch' AND scope IS NULL AND instr(source_id, '-') > 1")
 
 
 # ---------- settings ----------
@@ -144,8 +167,8 @@ def row_to_listing(row: sqlite3.Row) -> dict:
     d = dict(row)
     for col in JSON_COLS:
         d[col] = json.loads(d[col]) if d.get(col) else []
-    for col in ("active", "is_match", "favorite", "hidden", "detail_fetched", "alerted"):
-        d[col] = bool(d[col])
+    for col in ("active", "is_match", "favorite", "hidden", "detail_fetched", "alerted", "unverified"):
+        d[col] = bool(d.get(col))
     return d
 
 
@@ -159,6 +182,13 @@ def get_listing(listing_id: int) -> dict | None:
             dict(r) for r in conn.execute(
                 "SELECT price, at FROM price_history WHERE listing_id=? ORDER BY at", (listing_id,)
             )
+        ]
+        # The same home as listed elsewhere: each copy keeps its own row and link.
+        root = listing["dup_of"] or listing_id
+        listing["also_listed"] = [
+            dict(r) for r in conn.execute(
+                "SELECT id, source, url, title, price, active, last_seen FROM listings "
+                "WHERE (id=? OR dup_of=?) AND id!=? ORDER BY id", (root, root, listing_id))
         ]
     return listing
 
@@ -176,6 +206,7 @@ def query_listings(
     min_price: int | None = None, max_price: int | None = None,
     min_beds: float | None = None, max_beds: float | None = None,
     text: str | None = None, new_since_hours: float | None = None, search_notes: bool = True,
+    available_now: bool = False, cats_ok: bool = False,
     sort: str = "score", limit: int = 200, offset: int = 0,
 ) -> tuple[list[dict], int]:
     where, args = [], []
@@ -215,6 +246,10 @@ def query_listings(
         fields = ["title", "description", "address"] + (["notes"] if search_notes else [])
         where.append("(" + " OR ".join(f"{f} LIKE ?" for f in fields) + ")")
         args += [like] * len(fields)
+    if available_now:
+        where.append("avail='now'")
+    if cats_ok:
+        where.append("cats_ok IN ('yes', 'one')")
     if new_since_hours is not None:
         where.append("first_seen >= ?")
         args.append((datetime.now(timezone.utc) - timedelta(hours=float(new_since_hours)))

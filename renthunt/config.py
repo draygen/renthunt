@@ -5,6 +5,23 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_env_file(path: Path) -> None:
+    """Read KEY=VALUE lines into the environment. Values already set in the environment win."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip().removeprefix("export ").strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+load_env_file(ROOT / ".env")  # secrets such as RENTCAST_API_KEY; the file is git-ignored
 DATA_DIR = Path(os.environ.get("RENTHUNT_DATA", ROOT / "data"))
 DB_PATH = DATA_DIR / "renthunt.db"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -43,6 +60,8 @@ DEFAULT_SETTINGS: dict = {
         "max_beds": 3,
         "min_baths": 0,
         "cats": False,  # require cats allowed
+        "cat_count": 1,  # how many cats; 2+ also watches for one-cat limits
+        "move_in": "any",  # "asap" favours places available now and drops ones far in the future
         "dogs": False,  # require dogs allowed
         "must_have": [],  # every phrase must appear in the listing text
         "nice_to_have": ["parking", "laundry", "heat included", "hot water included"],
@@ -53,7 +72,28 @@ DEFAULT_SETTINGS: dict = {
     "sources": {
         "craigslist": {"enabled": True, "radius_miles": 4, "detail_fetch_limit": 25},
         "rentcom": {"enabled": True, "pages_per_town": 1},
-        "watch": {"enabled": True},  # pages you add, read by the local model
+        "watch": {"enabled": True, "render_timeout_seconds": 30},  # pages you add (see sources/ai_sources.py)
+        # Optional paid API, off by default. The key is read from RENTCAST_API_KEY, never from here.
+        "rentcast": {
+            "enabled": False,
+            "max_requests_per_hunt": 8,     # one request per town, more when a town has over 500 results
+            "max_requests_per_month": 45,   # hard stop; RentCast's free plan allows 50
+            "hours_between_checks": 168,    # do not ask about the same town more often than this
+            "max_pages_per_town": 2,
+            "billing_day": 1,               # day of the month your RentCast plan renews
+        },
+        # Listing alerts emailed by sites that block automated visits (see sources/mail.py).
+        # The mailbox sign-in is read from RENTHUNT_MAIL_USER / RENTHUNT_MAIL_PASSWORD, never from here.
+        "mail": {
+            "enabled": False,
+            "gmail_token_file": "",       # a Google read-only OAuth token file; empty = use IMAP below
+            "host": "imap.gmail.com", "port": 993, "folder": "INBOX",
+            "senders": ["zillow.com", "apartments.com", "hotpads.com", "realtor.com", "trulia.com",
+                        "redfin.com", "zumper.com", "padmapper.com"],
+            "days_back": 7,               # how far back to look for alerts not read yet
+            "max_messages_per_hunt": 15,  # each email is one or more local-model calls
+            "keep_days": 21,              # drop an emailed listing no alert has mentioned for this long
+        },
     },
     "schedule": {
         "enabled": True,

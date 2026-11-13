@@ -9,7 +9,6 @@ from typing import AsyncIterator
 import httpx
 
 from . import actions, ai, db, hunt
-from .sources.base import miles
 
 MAX_ROUNDS = 6
 HISTORY_MESSAGES = 16
@@ -22,7 +21,8 @@ How to work:
 - Everything you say about listings must come from a tool result. Call search_listings or \
 get_listing before describing, comparing or recommending anything; never make up a listing, \
 price or address.
-- The app shows every listing you find as photo cards in the main view and as pins on the map, \
+- Every search you run is applied to the page's filter bar, and the page shows all the results \
+as photo cards and as pins on the map, \
 so do not repeat the whole result list. Say how many you found, then give your top two or \
 three picks. Start each pick on its own line with its id marker, like "#123", followed by one \
 or two plain sentences on why it is worth a look: what is included, how close it is, when it \
@@ -37,13 +37,18 @@ a town. Tell the user which place you searched around.
 - When the user tells you what they want (budget, bedrooms, towns, pets, features), save it \
 with update_criteria or set_towns right away, then say in one sentence what you changed and \
 how many listings now match. "A 2 bedroom" means min_beds 2 and max_beds 2; "under $2,000" \
-means max_price 2000.
+means max_price 2000. "Include 3 bedrooms", "also 3 bedrooms" or "up to 3 bedrooms" widens the \
+range: change only the end that has to move (here max_beds 3) and leave the other as it is.
 - Describe each listing with the numbers from the tool result, even when they differ from what \
 the user asked for.
 - When they react to a listing ("love it", "not for me", "I emailed them"), record it with \
 update_listing.
 - You can draft a short, friendly inquiry message to a landlord when asked; base it on the \
-listing details and leave a placeholder for the user's name.
+listing details, sign it "Brian", and work in the user's situation from the criteria below \
+(for example how soon they need to move and how many cats they have), asking the landlord to \
+confirm those points.
+- When the criteria say the user must move immediately, lead with places that are available \
+now, and say plainly when a place's move-in date or pet policy is not stated.
 - Listings marked with a "possible scam" flag deserve a plain warning.
 - Keep answers short and concrete. Ask a question only when you cannot proceed without it.
 
@@ -82,6 +87,8 @@ TOOLS = [
             "radius_miles": {**_num, "description": "With near: how far out to look, default 2"},
             "min_price": _num, "max_price": _num, "min_beds": _num, "max_beds": _num,
             "new_since_hours": {**_num, "description": "Only listings first seen in the last N hours"},
+            "available_now": {"type": "boolean", "description": "Only places that can be moved into right away"},
+            "cats_ok": {"type": "boolean", "description": "Only places that state cats are allowed"},
             "sort": {"type": "string", "enum": ["score", "newest", "price_asc", "price_desc"]},
             "limit": {**_num, "description": "Rows to return, default 10, at most 20"},
         }),
@@ -98,7 +105,8 @@ TOOLS = [
     _fn("get_settings", "Current criteria, towns, schedule, watched pages, and status of the last and next hunt.", {}),
     _fn("update_criteria",
         "Change search criteria. Send only the fields that change. List fields replace the whole list. "
-        "For an exact size such as 'a 2 bedroom', set both min_beds and max_beds to 2.",
+        "For an exact size such as 'a 2 bedroom', set both min_beds and max_beds to 2. To include "
+        "another size as well ('also 3 bedrooms'), move only one end of the range.",
         {
             "min_price": _num, "max_price": _num, "min_beds": _num, "max_beds": _num, "min_baths": _num,
             "cats": {"type": "boolean", "description": "Require that cats are allowed"},
@@ -108,6 +116,8 @@ TOOLS = [
             "exclude": {**_strs, "description": "Phrases that rule a listing out"},
             "max_age_days": _num,
             "notes": {"type": "string", "description": "Free-text preferences to remember"},
+            "cat_count": {**_num, "description": "How many cats the user has"},
+            "move_in": {"type": "string", "enum": ["any", "asap"], "description": "asap = must move right away"},
         }),
     _fn("set_towns", "Turn towns on or off for the search, or add a new town by ZIP code.",
         {
@@ -147,11 +157,14 @@ def _compact(listing: dict) -> dict:
         "id": listing["id"], "title": listing["title"][:70], "town": listing["town"],
         "rent": listing["match_price"] or listing["price"], "beds": beds, "baths": listing["baths"],
         "source": listing["source"], "status": listing["status"],
-        "first_seen": listing["first_seen"][:10], "highlights": listing["reasons"][1:3],
+        "first_seen": listing["first_seen"][:10], "highlights": listing["reasons"][1:4],
+        "move_in": listing.get("avail"), "cats": listing.get("cats_ok"),
         "features": (listing["amenities"] or [])[:6],
     }
     if listing["favorite"]:
         row["favorite"] = True
+    if listing.get("unverified"):
+        row["availability"] = "unverified: its source could not be checked on the last hunt"
     if listing["flags"]:
         row["flags"] = listing["flags"]
     if listing["available"]:
@@ -174,49 +187,42 @@ def run_tool(name: str, args: dict) -> dict:
             if isinstance(towns, str):
                 towns = [towns]
             known = {t["name"].lower(): t["name"] for t in db.get_settings()["towns"]}
-            towns = [known.get(str(t).lower(), str(t)) for t in towns or []] or None
+            towns = [known[str(t).lower()] for t in towns or [] if str(t).lower() in known] or None
             limit = min(20, max(1, _opt(args, "limit", int) or 10))
-            near = (args.get("near") or "").strip()
+            near = (args.get("near") or "").strip() or None
             filters = dict(
                 view=args.get("view") or "matches", text=args.get("text") or None, towns=towns,
                 min_price=_opt(args, "min_price", int), max_price=_opt(args, "max_price", int),
                 min_beds=_opt(args, "min_beds", float), max_beds=_opt(args, "max_beds", float),
                 new_since_hours=_opt(args, "new_since_hours", float),
+                available_now=bool(args.get("available_now")), cats_ok=bool(args.get("cats_ok")),
             )
-            if near:
-                saved = next((p for p in db.get_settings()["places"]
-                              if p["name"].lower() in near.lower()), None)
-                center = ({"lat": saved["lat"], "lng": saved["lng"], "label": saved["name"]}
-                          if saved else actions.geocode(near))
-                if saved and not args.get("radius_miles"):
-                    args["radius_miles"] = 4
-                if not center:
-                    return {"error": f"could not find '{near}' on the map. Ask the user which town it is in, "
-                                     "then search again with the town added, e.g. 'Main St, Dracut'."}
-                radius = _opt(args, "radius_miles", float) or 2.0
-                filters["towns"] = None  # distance decides, not town lines
-                everything, _ = db.query_listings(**filters, limit=5000)
-                located = sorted(
-                    ((miles(center["lat"], center["lng"], l["lat"], l["lng"]), l)
-                     for l in everything if l["lat"] is not None and l["lng"] is not None),
-                    key=lambda pair: pair[0])
-                within = [pair for pair in located if pair[0] <= radius]
-                note = None
-                if not within:
-                    within = located[:5]
-                    note = f"Nothing within {radius:g} miles; these are the closest."
-                picked = within[:limit]
-                rows = [{**_compact(l), "distance_miles": round(d, 1)} for d, l in picked]
-                out = {"searched_around": center["label"], "found_within_radius": len(within),
-                       "showing": len(rows), "listings": rows}
-                if note:
-                    out["note"] = note
-                out["_ui"] = {"ids": [l["id"] for _, l in picked], "label": f"near {center['label']}",
-                              "center": center, "distances": {l["id"]: round(d, 1) for d, l in picked}}
-                return out
-            listings, total = db.query_listings(**filters, sort=args.get("sort") or "score", limit=limit)
-            return {"total_found": total, "showing": len(listings), "listings": [_compact(l) for l in listings],
-                    "_ui": {"ids": [l["id"] for l in listings], "label": "from the assistant"}}
+            sort = args.get("sort") or "score"
+            radius = _opt(args, "radius_miles", float)
+            found = actions.search(near=near, radius_miles=radius, sort=sort, limit=limit, **filters)
+            note = None
+            if near and not found["total"]:
+                radius = (found["center"]["radius"]) * 3
+                found = actions.search(near=near, radius_miles=radius, sort=sort, limit=limit, **filters)
+                note = f"Nothing that close, so the search was widened to {radius:g} miles."
+            rows = []
+            for listing in found["listings"]:
+                row = _compact(listing)
+                if "distance" in listing:
+                    row["distance_miles"] = listing["distance"]
+                rows.append(row)
+            out = {"total_found": found["total"], "showing": len(rows), "listings": rows}
+            if found["center"]:
+                out["searched_around"] = found["center"]["label"]
+            if note:
+                out["note"] = note
+            # The page mirrors this search in its filter bar and shows every result.
+            shown = {k: v for k, v in {**filters, "near": near, "sort": sort,
+                                       "radius_miles": found["center"]["radius"] if found["center"] else None,
+                                       }.items() if v not in (None, False, "") and k != "new_since_hours"}
+            if filters["new_since_hours"] is None:
+                out["_ui"] = {"filters": shown}
+            return out
         if name == "get_listing":
             listing = db.get_listing(int(args["id"]))
             if not listing:
@@ -242,7 +248,8 @@ def run_tool(name: str, args: dict) -> dict:
                 "towns_available": [t["name"] for t in settings["towns"] if not t["enabled"]],
                 "schedule": settings["schedule"],
                 "sources": {k: v["enabled"] for k, v in settings["sources"].items()},
-                "watched_pages": [{"url": w["url"], "label": w["label"], "last_status": w["last_status"]}
+                "watched_pages": [{"url": w["url"], "label": w["label"], "state": w.get("state"),
+                                   "last_status": w["last_status"], "last_good_check": w.get("last_success")}
                                   for w in actions.list_watches()],
                 **{k: v for k, v in actions.overview().items() if k != "ai"},
             }
@@ -358,8 +365,8 @@ async def respond(session_id: str, text: str) -> AsyncIterator[dict]:
                     result = await asyncio.to_thread(run_tool, name, args if isinstance(args, dict) else {})
                     changed = changed or (name in MUTATING and "error" not in result)
                     ui = result.pop("_ui", None)
-                    if ui and ui["ids"]:
-                        yield {"type": "show", **ui}
+                    if ui:
+                        yield {"type": "filters", **ui}
                     reply = {"role": "tool", "tool_name": name, "content": json.dumps(result, default=str)}
                     messages.append(reply)
                     _save(session_id, reply)

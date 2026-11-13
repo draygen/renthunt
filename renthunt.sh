@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RentHunt launcher.  ./renthunt.sh [start|hunt|tunnel|install-service|uninstall-service|status]
+# RentHunt launcher.  ./renthunt.sh [start|hunt|check-page|check-mail|test|tunnel|install-service|uninstall-service|status]
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 PY=.venv/bin/python
@@ -18,6 +18,12 @@ case "${1:-start}" in
     exec "$PY" -m renthunt.app ;;
   hunt)   # one hunt from the command line, without the web app
     exec "$PY" -c 'from renthunt import db, hunt; db.init(); r = hunt.run("cli"); print(hunt.last_run()["log"] if r else "A hunt is already running.")' ;;
+  check-page)   # dry run of one watched page: ./renthunt.sh check-page URL [--browser]
+    shift; exec "$PY" -m renthunt.sources.ai_sources "$@" ;;
+  check-mail)   # dry run of the email-alert reader; stores nothing
+    exec "$PY" -m renthunt.sources.mail ;;
+  test)
+    exec "$PY" -m unittest discover -s tests -t . ;;
   install-service)   # keep RentHunt (and its schedule) running in the background
     mkdir -p "$(dirname "$UNIT")"
     cat > "$UNIT" <<EOF
@@ -49,5 +55,5 @@ EOF
     exec cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" ;;
   status)
     systemctl --user status renthunt.service --no-pager 2>/dev/null || echo "Background service is not installed." ;;
-  *) echo "Usage: $0 [start|hunt|tunnel|install-service|uninstall-service|status]"; exit 1 ;;
+  *) echo "Usage: $0 [start|hunt|check-page URL|check-mail|test|tunnel|install-service|uninstall-service|status]"; exit 1 ;;
 esac
