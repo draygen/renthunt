@@ -200,6 +200,9 @@ def update_schedule(patch: dict) -> dict:
         sched["enabled"] = _coerce(patch["enabled"], bool)
     if patch.get("interval_hours") is not None:
         sched["interval_hours"] = min(168.0, max(0.5, float(patch["interval_hours"])))
+    if patch.get("quick_minutes") is not None:
+        minutes = float(patch["quick_minutes"])
+        sched["quick_minutes"] = 0 if minutes <= 0 else min(720.0, max(10.0, minutes))
     for key in ("quiet_start", "quiet_end"):
         if patch.get(key) is not None:
             sched[key] = int(patch[key]) % 24
@@ -271,5 +274,6 @@ def overview() -> dict:
         "step": hunt.progress["step"],
         "last_run": last and {k: last[k] for k in ("id", "started_at", "finished_at", "status", "trigger", "summary")},
         "next_run": due.isoformat(timespec="seconds") if due else None,
+        "next_quick": (lambda q: q.isoformat(timespec="seconds") if q else None)(hunt.next_quick_time(settings)),
         "ai": ai.status(settings),
     }

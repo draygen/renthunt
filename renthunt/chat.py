@@ -129,6 +129,8 @@ TOOLS = [
         {
             "enabled": {"type": "boolean"},
             "interval_hours": _num,
+            "quick_minutes": {**_num, "description": "Minutes between quick checks of Craigslist, watched pages "
+                                                     "and email alerts; 0 turns them off"},
             "quiet_start": {**_num, "description": "Hour (0-23) when automatic runs pause"},
             "quiet_end": {**_num, "description": "Hour (0-23) when they resume"},
         }),

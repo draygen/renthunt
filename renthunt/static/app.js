@@ -114,12 +114,14 @@ async function loadOverview() {
     status.textContent = o.step || "Hunting…";
   } else {
     const parts = [];
-    if (o.last_run) parts.push(`Last hunt ${ago(o.last_run.finished_at || o.last_run.started_at)}` +
+    if (o.last_run) parts.push(`${o.last_run.trigger === "quick" ? "Last quick check" : "Last hunt"} ${ago(o.last_run.finished_at || o.last_run.started_at)}` +
       (o.last_run.status !== "ok" ? ` (${RUN_STATUS[o.last_run.status] || o.last_run.status})` : ""));
     const problems = o.last_run && o.last_run.status !== "ok" ? runProblems(o.last_run.summary) : [];
     status.title = problems.length ? "Could not be checked on the last hunt:\n" + problems.join("\n") : "Hunt status";
+    const clock = (t) => new Date(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const soonest = o.next_quick && (!o.next_run || o.next_quick < o.next_run) ? o.next_quick : null;
     parts.push(o.next_run
-      ? `next at ${new Date(o.next_run).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+      ? (soonest ? `quick check at ${clock(soonest)} · full hunt at ${clock(o.next_run)}` : `next at ${clock(o.next_run)}`)
       : "schedule off");
     status.textContent = parts.join(" · ");
   }
@@ -668,6 +670,7 @@ async function openSettings() {
     mail: check(s.sources.mail?.enabled), mailSenders: h("input", { class: "wide", value: csv(s.sources.mail?.senders || []) }),
     mailKeep: num(s.sources.mail?.keep_days, { min: 1 }),
     sched: check(s.schedule.enabled), interval: num(s.schedule.interval_hours, { min: 0.5, step: 0.5 }),
+    quick: num(s.schedule.quick_minutes ?? 30, { min: 0, step: 5 }),
     quietStart: num(s.schedule.quiet_start, { min: 0, max: 23 }), quietEnd: num(s.schedule.quiet_end, { min: 0, max: 23 }),
     minScore: num(s.notify.min_score, { min: 0, max: 100 }),
     webhook: h("input", { class: "wide", value: s.notify.webhook_url, placeholder: "https://ntfy.sh/your-private-topic or a Discord/Slack webhook" }),
@@ -716,6 +719,7 @@ async function openSettings() {
     if (s.sources.mail) Object.assign(s.sources.mail, { enabled: f.mail.checked, senders: uncsv(f.mailSenders.value),
       keep_days: Math.max(1, +f.mailKeep.value || 21) });
     Object.assign(s.schedule, { enabled: f.sched.checked, interval_hours: Math.max(0.5, +f.interval.value || 4),
+      quick_minutes: +f.quick.value > 0 ? Math.max(10, +f.quick.value) : 0,
       quiet_start: +f.quietStart.value || 0, quiet_end: +f.quietEnd.value || 0 });
     Object.assign(s.notify, { min_score: +f.minScore.value || 0, webhook_url: f.webhook.value.trim() });
     Object.assign(s.ai, { base_url: f.aiUrl.value.trim(), model: f.aiModel.value, num_ctx: +f.aiCtx.value || 16384, think: f.aiThink.checked });
@@ -805,12 +809,17 @@ async function openSettings() {
 
       h("h3", {}, "Schedule"),
       h("div", { class: "row" }, h("label", {}, f.sched, "Hunt automatically"), field("Every (hours)", f.interval),
+        field("Quick check of Craigslist, watched pages and email every (minutes, 0 = off)", f.quick),
         field("Quiet from (hour, 0–23)", f.quietStart), field("Quiet until (hour)", f.quietEnd)),
       h("p", { class: "hint" }, "Automatic hunts run while RentHunt itself is running."),
 
       h("h3", {}, "Alerts"),
       h("div", { class: "row" }, field("Alert me about new matches scoring at least", f.minScore)),
-      h("div", { class: "row" }, field("Push alerts to (leave empty for in-app only)", f.webhook, "wide-field")),
+      h("div", { class: "row" }, field("Push alerts to (leave empty for in-app only)", f.webhook, "wide-field"),
+        h("button", { onclick: async () => {
+          try { await api("/api/notify/test", { method: "POST", body: { url: f.webhook.value.trim() } }); toast("Test alert sent"); }
+          catch (err) { toast(err.message); }
+        } }, "Send a test")),
 
       h("h3", {}, "Assistant (local model)"),
       h("p", { class: "hint" }, data.ai.ok ? `Connected to Ollama, ${data.ai.models.length} models installed.` : `Not connected: ${data.ai.error}`),

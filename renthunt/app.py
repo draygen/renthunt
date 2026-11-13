@@ -24,9 +24,14 @@ async def scheduler() -> None:
     await asyncio.sleep(20)
     while True:
         try:
-            due = hunt.next_run_time()
-            if due and not hunt.is_running() and due <= datetime.now().astimezone():
+            due, quick = hunt.next_run_time(), hunt.next_quick_time()
+            now = datetime.now().astimezone()  # after the two above: an overdue time comes back as "now"
+            if hunt.is_running():
+                pass
+            elif due and due <= now:
                 await asyncio.to_thread(hunt.run, "schedule")
+            elif quick and quick <= now:
+                await asyncio.to_thread(hunt.run, "quick", db.get_settings()["schedule"]["quick_sources"])
         except Exception as exc:  # the loop must survive anything
             print(f"scheduler error: {exc!r}")
         await asyncio.sleep(30)
@@ -287,6 +292,18 @@ def delete_watch(watch_id: int):
         conn.execute("DELETE FROM watch_urls WHERE id=?", (watch_id,))
         conn.execute("UPDATE listings SET active=0 WHERE source='watch' AND source_id LIKE ?", (f"w{watch_id}-%",))
     return actions.list_watches()
+
+
+@app.post("/api/notify/test")
+def notify_test(body: dict = Body(default={})):
+    url = (body.get("url") or db.get_settings()["notify"].get("webhook_url") or "").strip()
+    if not url:
+        raise HTTPException(400, "Enter an alert address first")
+    try:
+        hunt.push_test(url)
+    except Exception as exc:
+        raise HTTPException(502, f"The alert could not be sent: {str(exc)[:200]}") from exc
+    return {"sent": True}
 
 
 @app.post("/api/hunt")

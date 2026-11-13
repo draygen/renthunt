@@ -111,14 +111,20 @@ def beds_label(beds: float | None) -> str:
     return "studio" if beds == 0 else f"{beds:g}"
 
 
-def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict:
-    """Returns {is_match, match_price, score, reasons, flags}."""
+def evaluate(listing: dict, settings: dict, medians: dict | None = None, building: str = "") -> dict:
+    """Returns {is_match, match_price, score, reasons, flags}.
+
+    `building` is the text of other listings at the same address. What a listing does not
+    say about pets and features is filled in from it, since those rarely differ by unit.
+    A fact nobody states is treated as unknown (something to ask), not as a no.
+    """
     c = settings["criteria"]
     enabled = [t["name"] for t in settings["towns"] if t.get("enabled")]
     text = " ".join([
         listing.get("title") or "", listing.get("description") or "",
         " ".join(listing.get("amenities") or []),
     ]).lower()
+    building = (building or "").lower()
     good, bad, flags = [], [], []
 
     # --- hard requirements ---
@@ -159,6 +165,13 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
 
     pets_confirmed = 0
     cats = cat_policy(text)
+    cats_from_building = False
+    if cats == "unknown" and building:
+        theirs = cat_policy(building)
+        if theirs in ("yes", "one"):
+            cats, cats_from_building = theirs, True
+        elif theirs == "no" and c.get("cats"):
+            flags.append("another listing at this address says no cats")
     cat_count = int(c.get("cat_count") or 1)
     cat_penalty = 0
     if c.get("cats"):
@@ -168,7 +181,7 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
             flags.append(f"may allow only one cat (you have {cat_count})")
             cat_penalty = 12
         elif cats in ("yes", "one"):
-            good.append("cats OK")
+            good.append("cats OK at this building" if cats_from_building else "cats OK")
             pets_confirmed += 1
             if cat_count >= 2:
                 flags.append(f"confirm {cat_count} cats are OK")
@@ -203,8 +216,13 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
     if listing.get("town") in enabled:
         score += 15 * (1 - enabled.index(listing["town"]) / max(1, len(enabled)))
     nice = c.get("nice_to_have") or []
-    hits = [p for p in nice if _has(text, p)]
-    score += 20 * len(hits) / len(nice) if nice else 10
+    hits = [p for p in nice if _has(text, p) or (building and _has(building, p))]
+    silent = len(listing.get("description") or "") < 60 and not listing.get("amenities") and not building
+    if nice and silent and not hits:
+        score += 8  # says nothing about features: unknown, not absent
+        flags.append("features not listed")
+    else:
+        score += 20 * len(hits) / len(nice) if nice else 10
     if hits:
         good.append(", ".join(hits))
     if age is not None:
@@ -213,7 +231,7 @@ def evaluate(listing: dict, settings: dict, medians: dict | None = None) -> dict
     score += 5 if (listing.get("sqft") or len(listing.get("description") or "") > 200) else 0
     score += 2.5 * pets_confirmed - cat_penalty
     if asap:  # when the move is urgent, being ready now matters more than polish
-        score += {"now": 15, "soon": 4, "unknown": -6}.get(avail, 0)
+        score += {"now": 15, "soon": 4, "unknown": 4}.get(avail, 0)  # unknown: ask, do not bury
         if avail == "unknown":
             flags.append("move-in date not stated")
     score = max(0.0, min(100.0, score))

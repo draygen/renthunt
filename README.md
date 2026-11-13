@@ -61,14 +61,22 @@ A quick tunnel gets a new random `trycloudflare.com` address each time it starts
   from was actually checked. A hunt where some searches failed is reported as partly
   checked, with the list of what failed.
 - **Scoring.** Each listing gets a 0-100 match score from rent, town order, nice-to-have
-  features, freshness, and detail. Hard rules (rent, bedrooms, towns, pets, must-have and
+  features, freshness, and detail. What a listing does not say (pets, move-in date,
+  features) is tagged as something to ask rather than counted against it, and a bare unit
+  record takes the pet policy and features stated by another listing at the same address. Hard rules (rent, bedrooms, towns, pets, must-have and
   excluded words) decide whether it is a match at all.
 - **Warnings.** Suspicious wording or a rent far below the local median is flagged as a
   possible scam and pushed down the list. Reposts of the same Craigslist ad are folded together.
 - **Tracking.** Save favorites, hide listings, record where each one stands (contacted,
   touring, applied), and keep notes. Rent changes are recorded.
 - **Alerts.** New matches above a score you choose show as NEW in the app and can be pushed
-  to an ntfy.sh topic or a Discord/Slack webhook.
+  to your phone through an ntfy topic (install the ntfy app and subscribe to the topic named
+  in Settings → Alerts; each match is its own notification and opens the listing when tapped)
+  or to a Discord/Slack webhook. "Send a test" in Settings checks the address. Anyone who
+  knows an ntfy.sh topic name can read it, so keep the name long and random.
+- **Quick checks.** Between full hunts, Craigslist, your watched pages and email alerts are
+  re-read every 30 minutes (Settings → Schedule; 0 switches it off), so a new post is seen
+  within minutes. Rent.com and RentCast are only read on full hunts. Quiet hours apply to both.
 - **Assistant.** Ask "what's new since yesterday?", say "I need two bedrooms under $2,100
   that take cats", or ask for a draft inquiry message. It can change your criteria, towns and
   schedule, mark listings, start a hunt, and add watched pages.

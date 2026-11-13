@@ -98,6 +98,10 @@ DEFAULT_SETTINGS: dict = {
     "schedule": {
         "enabled": True,
         "interval_hours": 4,
+        # Between full hunts, re-check just the sources that are cheap to read, so a new post
+        # is seen within minutes. 0 switches the quick checks off.
+        "quick_minutes": 30,
+        "quick_sources": ["craigslist", "watch", "mail"],
         "quiet_start": 23,  # no runs from 23:00 ...
         "quiet_end": 7,  # ... until 07:00 local time
     },

@@ -110,6 +110,41 @@ def _inherit_marks(conn, listings: list[dict], groups: dict[int, dict]) -> None:
         listing.update(marks)
 
 
+def _numbers(number: str) -> tuple[int, int] | None:
+    """House number or range ("1001-1009") as (low, high)."""
+    found = [int(n) for n in re.findall(r"\d+", number)]
+    return (min(found), max(found)) if found else None
+
+
+def _building_texts(listings: list[dict]) -> dict[int, str]:
+    """For each active listing, what the other active listings at its address say.
+
+    A community's page usually states the pet policy and what is included; a bare unit
+    record from an API or an email alert often does not. Same street and town, and house
+    numbers that are equal or fall in the other's range ("1001-1009 Westford St").
+    """
+    streets: dict[tuple, list[tuple[tuple[int, int], dict]]] = {}
+    for listing in listings:
+        home = dedupe.home_of(listing) if listing["active"] else None
+        span = _numbers(home.number) if home else None
+        if span:
+            streets.setdefault((home.street, home.town), []).append((span, listing))
+    out: dict[int, str] = {}
+    for group in streets.values():
+        if len(group) < 2:
+            continue
+        for span, listing in group:
+            parts = [
+                " ".join([other.get("title") or "", other.get("description") or "",
+                          " ".join(other.get("amenities") or [])])
+                for other_span, other in group
+                if other is not listing and span[0] <= other_span[1] and other_span[0] <= span[1]
+            ]
+            if parts:
+                out[listing["id"]] = " \n ".join(parts)[:8000]
+    return out
+
+
 def rescore_all() -> None:
     """Re-evaluate every listing against the current settings and regroup duplicates."""
     settings = db.get_settings()
@@ -125,8 +160,9 @@ def rescore_all() -> None:
 
         groups = dedupe.group(listings)
         _inherit_marks(conn, listings, groups)
+        neighbours = _building_texts(listings)
         for listing in listings:
-            result = scoring.evaluate(listing, settings, medians)
+            result = scoring.evaluate(listing, settings, medians, neighbours.get(listing["id"], ""))
             info = groups[listing["id"]]
             conn.execute(
                 "UPDATE listings SET is_match=?, match_price=?, score=?, reasons=?, flags=?, "
@@ -215,28 +251,72 @@ def _send_alerts(settings: dict, log) -> list[dict]:
     url = (settings["notify"].get("webhook_url") or "").strip()
     if not listings or not url:
         return listings
-    lines = [
-        f"${l['match_price'] or l['price']:,} · {scoring.beds_label(l['beds_min'])} bd · {l['town']} · "
-        f"score {l['score']} · {l['title'][:60]}\n{l['url']}"
-        for l in listings[:8]
-    ]
-    more = f"\n…and {len(listings) - 8} more" if len(listings) > 8 else ""
-    body = f"RentHunt: {len(listings)} new match(es)\n\n" + "\n\n".join(lines) + more
     try:
-        if "discord.com/api/webhooks" in url or "hooks.slack.com" in url:
-            key = "content" if "discord" in url else "text"
-            resp = httpx.post(url, json={key: body[:1900]}, timeout=20)
-        else:  # ntfy.sh and compatible: plain-text body
-            resp = httpx.post(url, content=body.encode(), headers={"Title": "RentHunt"}, timeout=20)
-        resp.raise_for_status()
+        push(url, listings)
         log(f"notify: sent {len(listings)} new matches")
     except Exception as exc:
         log(f"notify: webhook failed: {exc}")
     return listings
 
 
-def run(trigger: str = "manual") -> dict | None:
-    """Run one full hunt. Returns the run summary, or None if one is already running."""
+def _headline(l: dict) -> str:
+    return (f"${l['match_price'] or l['price']:,} · {scoring.beds_label(l['beds_min'])} bd · {l['town']} · "
+            f"score {l['score']}")
+
+
+PUSH_EACH = 5  # listings that get a notification of their own; the rest share one
+
+
+def push(url: str, listings: list[dict]) -> None:
+    """Send new matches to the alert address. Raises when the service refuses.
+
+    ntfy (ntfy.sh or your own server): one notification per listing, best first, that
+    opens the listing when tapped; strong matches are sent with high priority. Discord
+    and Slack webhooks get one message listing them all.
+    """
+    if "discord.com/api/webhooks" in url or "hooks.slack.com" in url:
+        lines = [f"{_headline(l)} · {l['title'][:60]}\n{l['url']}" for l in listings[:8]]
+        more = f"\n…and {len(listings) - 8} more" if len(listings) > 8 else ""
+        body = f"RentHunt: {len(listings)} new match(es)\n\n" + "\n\n".join(lines) + more
+        key = "content" if "discord" in url else "text"
+        httpx.post(url, json={key: body[:1900]}, timeout=20).raise_for_status()
+        return
+    base, _, topic = url.rstrip("/").rpartition("/")
+    if not topic or "://" not in base:
+        raise ValueError("the alert address should look like https://ntfy.sh/your-topic")
+    messages = []
+    for l in listings[:PUSH_EACH]:
+        notes = "; ".join([*l["reasons"][1:4], *(f"⚠ {f}" for f in l["flags"][:2])])
+        messages.append({"topic": topic, "title": _headline(l), "message": f"{l['title'][:90]}\n{notes}".strip(),
+                         "click": l["url"], "priority": 4 if l["score"] >= 75 else 3, "tags": ["house"]})
+    rest = listings[PUSH_EACH:]
+    if rest:
+        messages.append({"topic": topic, "title": f"RentHunt: {len(rest)} more new match(es)",
+                         "message": "\n".join(f"{_headline(l)} · {l['title'][:50]}" for l in rest[:12]),
+                         "priority": 3, "tags": ["house"]})
+    for message in reversed(messages):  # the best one arrives last, so it sits on top
+        httpx.post(base + "/", json=message, timeout=20).raise_for_status()
+
+
+def push_test(url: str) -> None:
+    base, _, topic = url.rstrip("/").rpartition("/")
+    if "discord.com/api/webhooks" in url or "hooks.slack.com" in url:
+        httpx.post(url, json={"content" if "discord" in url else "text": "RentHunt test alert"},
+                   timeout=20).raise_for_status()
+    elif topic and "://" in base:
+        httpx.post(base + "/", json={"topic": topic, "title": "RentHunt test alert", "tags": ["white_check_mark"],
+                                     "message": "Alerts are working. New matches will show up here."},
+                   timeout=20).raise_for_status()
+    else:
+        raise ValueError("the alert address should look like https://ntfy.sh/your-topic")
+
+
+def run(trigger: str = "manual", only: list[str] | None = None) -> dict | None:
+    """Run one hunt. Returns the run summary, or None if one is already running.
+
+    `only` limits it to the named sources (a quick check); the others are left exactly
+    as they were, neither refreshed nor counted as missing.
+    """
     if not _lock.acquire(blocking=False):
         return None
     lines: list[str] = []
@@ -270,6 +350,8 @@ def run(trigger: str = "manual") -> dict | None:
             watching = conn.execute("SELECT COUNT(*) FROM watch_urls WHERE enabled=1").fetchone()[0]
         if sources["watch"]["enabled"] and watching:
             plan.append(("watch", "Reading your watched pages"))
+        if only is not None:
+            plan = [step for step in plan if step[0] in only]
 
         limit = int(settings.get("inactive_after_missed_runs", 3))
         for name, label in plan:
@@ -321,7 +403,7 @@ def run(trigger: str = "manual") -> dict | None:
 
         progress["step"] = "Scoring"
         rescore_all()
-        if sources["craigslist"]["enabled"]:
+        if any(name == "craigslist" for name, _ in plan):
             _fetch_details(settings, fetcher, log)
             rescore_all()
         alerts = _send_alerts(settings, log)
@@ -372,17 +454,33 @@ def next_run_time(settings: dict | None = None) -> datetime | None:
         return None
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT finished_at FROM runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+            "SELECT finished_at FROM runs WHERE finished_at IS NOT NULL AND trigger != 'quick' "
+            "ORDER BY id DESC LIMIT 1"
         ).fetchone()
+    return _due(sched, row, timedelta(hours=max(0.25, float(sched.get("interval_hours", 4)))))
+
+
+def _due(sched: dict, last, every: timedelta) -> datetime:
     now = datetime.now().astimezone()
-    if row:
-        due = datetime.fromisoformat(row["finished_at"]).astimezone() + timedelta(
-            hours=max(0.25, float(sched.get("interval_hours", 4))))
-        due = max(due, now)
-    else:
-        due = now
+    due = max(datetime.fromisoformat(last["finished_at"]).astimezone() + every, now) if last else now
     start, end = int(sched.get("quiet_start", 23)), int(sched.get("quiet_end", 7))
     if _in_quiet(due.hour, start, end):
         wake = due.replace(hour=end, minute=0, second=0, microsecond=0)
         due = wake if wake > due else wake + timedelta(days=1)
     return due
+
+
+def next_quick_time(settings: dict | None = None) -> datetime | None:
+    """Local time of the next quick check of the cheap sources, or None when that is off.
+
+    Counted from the end of the last hunt of either kind, so a full hunt also resets it.
+    """
+    sched = (settings or db.get_settings())["schedule"]
+    minutes = float(sched.get("quick_minutes") or 0)
+    if not sched.get("enabled") or minutes <= 0 or not sched.get("quick_sources"):
+        return None
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT finished_at FROM runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return _due(sched, row, timedelta(minutes=max(10.0, minutes)))
