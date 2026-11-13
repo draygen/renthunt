@@ -47,6 +47,9 @@ listing details and leave a placeholder for the user's name.
 - Listings marked with a "possible scam" flag deserve a plain warning.
 - Keep answers short and concrete. Ask a question only when you cannot proceed without it.
 
+Saved people and places the user wants to be near: {places}. To find listings near one of \
+them, pass its name as `near` (for example near="Mom").
+
 Today is {today}.
 
 Current search criteria:
@@ -181,7 +184,12 @@ def run_tool(name: str, args: dict) -> dict:
                 new_since_hours=_opt(args, "new_since_hours", float),
             )
             if near:
-                center = actions.geocode(near)
+                saved = next((p for p in db.get_settings()["places"]
+                              if p["name"].lower() in near.lower()), None)
+                center = ({"lat": saved["lat"], "lng": saved["lng"], "label": saved["name"]}
+                          if saved else actions.geocode(near))
+                if saved and not args.get("radius_miles"):
+                    args["radius_miles"] = 4
                 if not center:
                     return {"error": f"could not find '{near}' on the map. Ask the user which town it is in, "
                                      "then search again with the town added, e.g. 'Main St, Dracut'."}
@@ -297,6 +305,7 @@ def _window(history: list[dict]) -> list[dict]:
 def _system(settings: dict) -> dict:
     counts = db.counts()
     return {"role": "system", "content": SYSTEM.format(
+        places=", ".join(f"{p['name']} ({p['label']})" for p in settings["places"]) or "none yet",
         today=datetime.now().strftime("%A, %B %-d, %Y"), criteria=ai.criteria_brief(settings),
         matches=counts["matches"], new=counts["new"])}
 

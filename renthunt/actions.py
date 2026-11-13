@@ -100,6 +100,28 @@ def geocode(place: str) -> dict | None:
     return found
 
 
+def add_place(name: str, where: str) -> dict:
+    """Save a person or place to measure listings against, e.g. ("Mom", "Andover, MA")."""
+    name, where = (name or "").strip(), (where or "").strip()
+    if not name or not where:
+        raise ValueError("a name and a location (town or address) are both needed")
+    spot = geocode(where)
+    if not spot:
+        raise ValueError(f"could not find '{where}' on the map; try adding the town or state")
+    settings = db.get_settings()
+    places = [p for p in settings["places"] if p["name"].lower() != name.lower()]
+    place = {"name": name, "label": spot["label"], "lat": spot["lat"], "lng": spot["lng"]}
+    settings["places"] = [*places, place]
+    db.save_settings(settings)
+    return place
+
+
+def remove_place(name: str) -> None:
+    settings = db.get_settings()
+    settings["places"] = [p for p in settings["places"] if p["name"].lower() != name.strip().lower()]
+    db.save_settings(settings)
+
+
 def set_towns(enable: list[str] = (), disable: list[str] = (), add: list[dict] = ()) -> dict:
     settings = db.get_settings()
     towns = settings["towns"]
@@ -195,6 +217,7 @@ def overview() -> dict:
     return {
         "counts": db.counts(),
         "towns": [t["name"] for t in settings["towns"] if t.get("enabled")],
+        "places": settings["places"],
         "running": hunt.is_running(),
         "step": hunt.progress["step"],
         "last_run": last and {k: last[k] for k in ("id", "started_at", "finished_at", "status", "trigger", "summary")},

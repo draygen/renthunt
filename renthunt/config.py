@@ -71,6 +71,9 @@ DEFAULT_SETTINGS: dict = {
         "num_ctx": 16384,  # context window to request; larger uses more VRAM
         "think": False,  # let the model reason before answering (slower, a bit smarter)
     },
+    # People and places you want to live near: [{"name", "label", "lat", "lng"}]. Each one gets a
+    # distance badge on every listing and a marker on the map. Shown only to the signed-in owner.
+    "places": [],
     "request_delay_seconds": 2.5,
     "inactive_after_missed_runs": 3,
 }

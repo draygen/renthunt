@@ -195,6 +195,7 @@ def mark_seen():
 def overview(request: Request):
     data = actions.overview()
     if not request.state.admin:
+        data["places"] = []  # where the owner's people live is not for visitors
         data["counts"].update(favorites=0, pipeline=0, hidden=0)
         data["ai"] = {"ok": data["ai"]["ok"], "model": "", "model_installed": True}
     return data
@@ -223,6 +224,21 @@ def add_town(body: dict = Body(...)):
     if result["problems"]:
         raise HTTPException(400, result["problems"][0])
     return {"settings": db.get_settings()}
+
+
+@app.post("/api/places")
+def add_place(body: dict = Body(...)):
+    try:
+        actions.add_place(body.get("name", ""), body.get("where", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return db.get_settings()["places"]
+
+
+@app.delete("/api/places/{name}")
+def delete_place(name: str):
+    actions.remove_place(name)
+    return db.get_settings()["places"]
 
 
 @app.post("/api/watches")

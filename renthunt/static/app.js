@@ -68,6 +68,7 @@ const TABS = [["matches", "Matches"], ["new", "New"], ["favorites", "Favorites"]
   ["pipeline", "In progress"], ["all", "All"], ["hidden", "Hidden"]];
 const VISITOR_TABS = ["matches", "new", "all"];
 const state = { view: "matches", listings: [], counts: {}, wasRunning: false, mapOn: false, admin: false, local: false,
+  places: [],        // people/places to show distance to (owner only)
   spotlight: null,   // {ids, label, center, distances}: the assistant's current result set
   byId: {} };        // every listing seen so far, for labelling #ids in chat
 let sessionId = localStorage.getItem("renthunt-session");
@@ -91,6 +92,7 @@ async function loadOverview() {
   state.counts = o.counts;
   renderTabs();
   renderTowns(o.towns || []);
+  renderPlaces(o.places || []);
   const status = $("#status");
   status.classList.toggle("running", o.running);
   $("#btn-hunt").disabled = o.running;
@@ -147,6 +149,11 @@ async function loadListings() {
       ? "ids=" + state.spotlight.ids.join(",") : filterQuery()));
     state.listings = data.listings;
     for (const l of data.listings) state.byId[l.id] = l;
+    const sortBy = $("#f-sort").value;
+    if (sortBy.startsWith("near:") && !state.spotlight) {
+      const place = state.places.find((p) => p.name === sortBy.slice(5));
+      if (place) state.listings.sort((a, b) => (milesTo(a, place) ?? 999) - (milesTo(b, place) ?? 999));
+    }
     renderSpotlight();
     $("#result-count").textContent = `${data.total} listing${data.total === 1 ? "" : "s"}`;
     renderGrid();
@@ -193,7 +200,7 @@ function renderCard(l) {
         distance !== undefined ? h("span", { class: "dist" }, ` · ${distance} mi away`) : null),
       h("div", { class: "title" }, l.title),
       h("div", { class: "why" }, (l.is_match ? l.reasons.slice(1) : l.reasons).join(" · ")),
-      h("div", { class: "badges" }, flagBadges(l), h("span", { class: "badge" }, ago(l.posted_at || l.first_seen))),
+      h("div", { class: "badges" }, placeBadges(l), flagBadges(l), h("span", { class: "badge" }, ago(l.posted_at || l.first_seen))),
       h("div", { class: "actions" },
         state.admin ? h("button", { class: "fav" + (l.favorite ? " on" : ""), title: "Favorite",
           onclick: stop(() => patchListing(l.id, { favorite: !l.favorite })) }, l.favorite ? "♥ Saved" : "♡ Save") : null,
@@ -213,6 +220,44 @@ function renderGrid() {
     return;
   }
   grid.replaceChildren(...state.listings.map(renderCard));
+}
+
+// ---------- proximity to saved people and places ----------
+function milesTo(l, place) {
+  if (l.lat === null || l.lng === null) return null;
+  const rad = Math.PI / 180;
+  const a = Math.sin((place.lat - l.lat) * rad / 2) ** 2
+    + Math.cos(l.lat * rad) * Math.cos(place.lat * rad) * Math.sin((place.lng - l.lng) * rad / 2) ** 2;
+  return 3958.8 * 2 * Math.asin(Math.sqrt(a));
+}
+const PLACE_COLOR = "#7c3aed";
+const nearness = (d) => (d <= 2 ? "close" : d <= 5 ? "mid" : "far");
+
+/** One pill per saved place: a dot coloured by distance, the name, the miles, and a small gauge. */
+function placeBadges(l) {
+  return state.places.map((place) => {
+    const d = milesTo(l, place);
+    if (d === null) return null;
+    const fill = Math.max(8, Math.round(100 * (1 - Math.min(d, 10) / 10)));
+    return h("span", { class: "badge prox " + nearness(d), title: `${d.toFixed(1)} miles from ${place.name} (${place.label})` },
+      h("span", { class: "dot" }), `${place.name} ${d < 10 ? d.toFixed(1) : Math.round(d)} mi`,
+      h("span", { class: "gauge" }, h("span", { style: `width:${fill}%` })));
+  });
+}
+
+function renderPlaces(places) {
+  const changed = JSON.stringify(places) !== JSON.stringify(state.places);
+  state.places = places;
+  const select = $("#f-sort");
+  const wanted = places.map((p) => "near:" + p.name);
+  const have = [...select.options].filter((o) => o.value.startsWith("near:")).map((o) => o.value);
+  if (wanted.join("|") !== have.join("|")) {
+    const current = select.value;
+    for (const option of [...select.options]) if (option.value.startsWith("near:")) option.remove();
+    for (const p of places) select.append(h("option", { value: "near:" + p.name }, `Closest to ${p.name}`));
+    select.value = [...select.options].some((o) => o.value === current) ? current : "score";
+  }
+  if (changed && state.listings.length) { renderGrid(); if (state.mapOn) renderMap(); }
 }
 
 // ---------- map ----------
@@ -251,6 +296,15 @@ function renderMap() {
     L.circleMarker([spot.center.lat, spot.center.lng], { radius: 9, color: "#fff", fillColor: "#1d4ed8", fillOpacity: 1, weight: 3 })
       .bindTooltip(spot.center.label, { permanent: true, direction: "bottom", className: "home" }).addTo(markerLayer);
     points.push([spot.center.lat, spot.center.lng]);
+  }
+  for (const place of state.places) {  // each saved person/place, with 2- and 5-mile rings
+    for (const [ringMiles, opacity] of [[2, 0.10], [5, 0.05]]) {
+      L.circle([place.lat, place.lng], { radius: ringMiles * 1609.34, color: PLACE_COLOR, weight: 1, dashArray: "4 4",
+        fillColor: PLACE_COLOR, fillOpacity: opacity, interactive: false }).addTo(markerLayer);
+    }
+    L.circleMarker([place.lat, place.lng], { radius: 9, color: "#fff", fillColor: PLACE_COLOR, fillOpacity: 1, weight: 3 })
+      .bindTooltip(place.name, { permanent: true, direction: "bottom", className: "place" })
+      .bindPopup(`${place.name} · ${place.label}. Rings mark 2 and 5 miles.`).addTo(markerLayer);
   }
   for (const l of state.listings) {
     if (l.lat === null || l.lng === null) continue;
@@ -301,7 +355,7 @@ async function openDetail(id) {
         h("div", {},
           h("h3", {}, `${money(l.match_price ?? l.price)}${l.price_max > (l.match_price ?? l.price) ? " – " + money(l.price_max) : ""} / month`),
           h("div", { class: "facts" }, [facts, l.address || l.town, l.available ? `Available: ${l.available}` : ""].filter(Boolean).join(" · ")),
-          h("div", { class: "badges", style: "margin-top:8px" }, flagBadges(l)),
+          h("div", { class: "badges", style: "margin-top:8px" }, placeBadges(l), flagBadges(l)),
           l.is_match
             ? h("p", {}, h("strong", {}, `Match score ${l.score}/100. `), l.reasons.join(" · "))
             : h("p", { class: "muted" }, h("strong", {}, "Not a match: "), l.reasons.join(" · ")),
@@ -520,6 +574,7 @@ async function openSettings() {
   drawWatches(data.watches);
   const newWatch = { url: h("input", { placeholder: "https://… page that lists vacancies", size: 40 }), label: h("input", { placeholder: "Label (optional)" }) };
 
+  const newPlace = { name: h("input", { placeholder: "Name, e.g. Mom" }), where: h("input", { placeholder: "Town or address", size: 28 }) };
   const collect = () => {
     for (const { town, box } of townBoxes) town.enabled = box.checked;
     Object.assign(s.criteria, {
@@ -588,6 +643,22 @@ async function openSettings() {
           newWatch.url.value = newWatch.label.value = "";
         } catch (err) { toast(err.message); }
       } }, "Watch page")),
+
+      h("h3", {}, "People and places to be near"),
+      h("p", { class: "hint" }, "Each one adds a distance badge to every listing, a marker with 2- and 5-mile rings on the map, and a “Closest to…” sort. Only you see these."),
+      (s.places || []).map((place) => h("div", { class: "row" }, h("strong", {}, place.name), h("span", { class: "muted" }, place.label),
+        h("button", { class: "link", onclick: async () => {
+          try { collect(); await api("/api/settings", { method: "PUT", body: s });
+            await api("/api/places/" + encodeURIComponent(place.name), { method: "DELETE" }); openSettings(); loadOverview(); }
+          catch (err) { toast(err.message); } } }, "Remove"))),
+      h("div", { class: "row" }, newPlace.name, newPlace.where, h("button", { onclick: async () => {
+        try {
+          collect();
+          await api("/api/settings", { method: "PUT", body: s });
+          await api("/api/places", { method: "POST", body: { name: newPlace.name.value, where: newPlace.where.value } });
+          openSettings(); loadOverview();
+        } catch (err) { toast(err.message); }
+      } }, "Add")),
 
       h("h3", {}, "Schedule"),
       h("div", { class: "row" }, h("label", {}, f.sched, "Hunt automatically"), field("Every (hours)", f.interval),
