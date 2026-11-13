@@ -262,7 +262,7 @@ function renderMap() {
     const marker = L.circleMarker([l.lat, l.lng], spot
       ? { radius: 10, color: "#fff", fillColor: "#0f766e", fillOpacity: 1, weight: 2 }
       : { radius: 8, color, fillColor: color, fillOpacity: 0.75, weight: 1 }).bindPopup(popup).addTo(markerLayer);
-    if (spot) marker.bindTooltip((isMobile() ? "" : `#${l.id} `) + money(l.match_price ?? l.price), { permanent: true, direction: "top", className: "pin", offset: [0, -8] });
+    if (spot) marker.bindTooltip(money(l.match_price ?? l.price), { permanent: true, direction: "top", className: "pin", offset: [0, -8] });
     markers[l.id] = marker;
     points.push([l.lat, l.lng]);
   }
@@ -292,7 +292,7 @@ async function openDetail(id) {
 
   dlg.replaceChildren(
     h("div", { class: "dlg-head" },
-      h("h2", {}, `#${l.id} · ${l.title}`),
+      h("h2", {}, l.title),
       h("a", { href: l.url, target: "_blank", rel: "noopener" }, h("button", { class: "primary" }, "Open listing ↗")),
       h("button", { onclick: close }, "Close")),
     h("div", { class: "dlg-body" },
@@ -340,26 +340,53 @@ const SUGGESTIONS = ["What's new since yesterday?", "Show me the 5 best matches"
 
 function richText(text) {
   const frag = document.createDocumentFragment();
-  const pattern = /(\*\*[^*\n]+\*\*)|(#\d+\b)|(https?:\/\/[^\s)<>\]]+)/g;
+  // A listing reference is written by the model as #123; it is shown as a described card, never as a number.
+  const pattern = /(\(?(?:\*\*)?#(\d+)\b(?:\*\*)?\)?[ \t]*[:–—-]?[ \t]*)|(\*\*[^*\n]+\*\*)|(https?:\/\/[^\s)<>\]]+)/g;
   let last = 0, m;
   while ((m = pattern.exec(text))) {
     frag.append(text.slice(last, m.index));
-    if (m[1]) frag.append(h("strong", {}, m[1].slice(2, -2)));
-    else if (m[2]) {
-      const id = Number(m[2].slice(1));
+    if (m[1]) {
+      const id = Number(m[2]);
       const known = state.byId[id];
-      const label = known ? `${m[2]} · ${money(known.match_price ?? known.price)} · ${[bedsText(known), known.town].filter(Boolean).join(" · ")}` : m[2];
-      frag.append(h("a", { class: "ref" + (known ? " chip" : ""), title: known ? known.title : "Open this listing",
-        onclick: () => focusListing(id), ondblclick: () => openDetail(id) }, label));
-    } else frag.append(h("a", { href: m[3], target: "_blank", rel: "noopener" }, m[3]));
+      if (!known) pendingRefs.add(id);
+      const distance = state.spotlight?.distances?.[id];
+      const lineStart = /(^|\n)[ \t>*•-]*$/.test(text.slice(0, m.index));
+      if (!lineStart) {  // mentioned mid-sentence: a small link, so the sentence still reads naturally
+        frag.append("(", h("a", { class: "ref", title: known ? known.title : "Show this listing",
+          onclick: () => focusListing(id), ondblclick: () => openDetail(id) }, "show it"), ") ");
+      } else frag.append(h("a", { class: "ref chip", title: "Show this listing", onclick: () => focusListing(id), ondblclick: () => openDetail(id) },
+        h("span", { class: "chip-title" }, known ? known.title : "Listing"),
+        known ? h("span", { class: "chip-facts" }, [money(known.match_price ?? known.price) + "/mo", bedsText(known),
+          known.baths ? `${known.baths} ba` : "", known.address && known.address.split(",")[0] !== known.town ? known.address.split(",")[0] : "", known.town,
+          distance !== undefined ? `${distance} mi away` : ""].filter(Boolean).join(" · ")) : null));
+    } else if (m[3]) frag.append(h("strong", {}, m[3].slice(2, -2)));
+    else frag.append(h("a", { href: m[4], target: "_blank", rel: "noopener" }, m[4]));
     last = pattern.lastIndex;
   }
   frag.append(text.slice(last));
   return frag;
 }
 
+const pendingRefs = new Set();
+
+/** Look up listings mentioned in chat that are not on screen, then redraw those messages. */
+async function resolveRefs() {
+  const ids = [...pendingRefs].filter((id) => !state.byId[id]);
+  pendingRefs.clear();
+  if (!ids.length) return;
+  try {
+    const data = await api("/api/listings?ids=" + ids.join(","));
+    for (const l of data.listings) state.byId[l.id] = l;
+  } catch (_) { return; }
+  for (const el of document.querySelectorAll("#chat-log .msg.assistant[data-raw]")) {
+    el.replaceChildren(richText(el.dataset.raw));
+  }
+  pendingRefs.clear();  // ids that no longer exist stay as a plain "Listing" link
+}
+
 function addMessage(role, text) {
   const el = h("div", { class: "msg " + role }, role === "assistant" ? richText(text) : text);
+  if (role === "assistant") el.dataset.raw = text;
   $("#chat-log").append(el);
   el.scrollIntoView({ block: "end" });
   return el;
@@ -375,6 +402,7 @@ async function loadChat() {
   let history = [];
   try { history = await api(`/api/chat/${sessionId}`); } catch (_) { /* fresh start */ }
   for (const m of history) addMessage(m.role, m.content);
+  resolveRefs();
   if (!history.length) {
     addMessage("assistant", "Hi! I can search your listings, compare places, remember what you're looking for, " +
       "and draft messages to landlords. Tell me what you want in plain words.");
@@ -433,7 +461,9 @@ async function askAssistant(text) {
     addMessage("error", err.message);
   }
   working.remove();
+  bubble.dataset.raw = answer;
   if (answer.trim()) bubble.replaceChildren(richText(answer)); else bubble.remove();
+  resolveRefs();
   if (shown && isMobile()) {  // on a phone the results sit behind the assistant sheet
     $("#chat-log").append(h("button", { class: "primary", onclick: () => $("#chat").classList.add("hidden") },
       `View ${shown === 1 ? "this listing" : `these ${shown} listings`} on the map`));

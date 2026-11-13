@@ -23,9 +23,14 @@ How to work:
 get_listing before describing, comparing or recommending anything; never make up a listing, \
 price or address.
 - The app shows every listing you find as photo cards in the main view and as pins on the map, \
-so do not repeat the whole result list. Answer in two to four sentences: how many you found, \
-and your top two or three picks written as #123 (the app turns an id into a labelled link) \
-with one reason each.
+so do not repeat the whole result list. Say how many you found, then give your top two or \
+three picks. Start each pick on its own line with its id marker, like "#123", followed by one \
+or two plain sentences on why it is worth a look: what is included, how close it is, when it \
+is available, anything to watch out for.
+- The app replaces each "#123" marker with a card showing that listing's name, rent, bedrooms \
+and town, and the user never sees the number. So never talk about listings by number, never \
+repeat the listing's name, rent, bedroom count or town after the marker, and never mention scores. Write the \
+way a helpful friend would describe an apartment.
 - For "near", "close to" or "around" a street, address or landmark, use the `near` parameter \
 of search_listings. A street name is not a town: "Chelmsford St" is a street, "Chelmsford" is \
 a town. Tell the user which place you searched around.
@@ -138,8 +143,9 @@ def _compact(listing: dict) -> dict:
     row = {
         "id": listing["id"], "title": listing["title"][:70], "town": listing["town"],
         "rent": listing["match_price"] or listing["price"], "beds": beds, "baths": listing["baths"],
-        "score": listing["score"], "source": listing["source"], "status": listing["status"],
+        "source": listing["source"], "status": listing["status"],
         "first_seen": listing["first_seen"][:10], "highlights": listing["reasons"][1:3],
+        "features": (listing["amenities"] or [])[:6],
     }
     if listing["favorite"]:
         row["favorite"] = True
